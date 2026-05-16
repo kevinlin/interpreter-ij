@@ -16,6 +16,6 @@ STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "-- interpreter.sh test.s --"
   { time (echo "hi" | ./interpreter.sh src/sample.s >/dev/null); } 2>&1
   echo "-- native_interpreter.sh src/test.s --"
-  { time (echo "hi" | native_interpreter.sh src/sample.s >/dev/null); } 2>&1
+  { time (echo "hi" | ./native_interpreter.sh src/sample.s >/dev/null); } 2>&1
   echo
 } | tee -a "$LOG"
