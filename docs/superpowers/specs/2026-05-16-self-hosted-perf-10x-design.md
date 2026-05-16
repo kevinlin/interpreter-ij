@@ -5,7 +5,7 @@ Status: Approved, ready for implementation planning.
 
 ## Goal
 
-Make `./bench.sh` self-hosted run (`./selfhosted_interpreter.sh src/sample.s`, stdin=`hi`) at least 10× faster.
+Make `./scripts/bench.sh` self-hosted run (`./scripts/selfhosted_interpreter.sh src/sample.s`, stdin=`hi`) at least 10× faster.
 
 - Current measured: real `1m10s`, user `3m4s` on macOS/arm64 (label `run-baseline` in `bench.log`).
 - Historical baseline (per README): 154s pre-C1 phase.
@@ -15,10 +15,10 @@ Make `./bench.sh` self-hosted run (`./selfhosted_interpreter.sh src/sample.s`, s
 ## Constraints
 
 - Self-hosted architecture preserved. Interpreter still written in IJ. No new IJ syntax.
-- `./src/verify.sh` checks 1–4 (functional, golden, MCP, JSON-RPC) green at **every commit**.
-- `./src/verify.sh` check 5 (bit-identical double self-transpile fixed-point) **green at end of each phase before merge**. May break mid-phase.
-- Use `compile-local.sh` (non-Docker) for verification — `build.sh` / Docker path silently swallows failures.
-- `./test.sh` green at every commit.
+- `./scripts/verify.sh` checks 1–4 (functional, golden, MCP, JSON-RPC) green at **every commit**.
+- `./scripts/verify.sh` check 5 (bit-identical double self-transpile fixed-point) **green at end of each phase before merge**. May break mid-phase.
+- Use `compile-local.sh` (non-Docker) for verification — `scripts/build.sh` / Docker path silently swallows failures.
+- `./scripts/test.sh` green at every commit.
 - `bench.log` appended per phase with labels of the form `phaseN-<name>`.
 - Drop-rule: phase that does not exceed predecessor by ≥1.3× is reverted (D4 lesson).
 
@@ -139,9 +139,9 @@ D3 helpers (`EqualsBool`, `LessThanBool`, …) keep their signatures shifted to 
 ### Exit criteria
 
 - No `IntValue{...}` / `BoolValue{...}` / `DoubleValue{...}` / `StringValue{...}` strings remain in interpreter.s codegen output paths.
-- `./test.sh` passes.
-- `./bench.sh phase1-tagged-value` ≥1.5× over `phase0-baseline` (target 2–4×).
-- `./src/verify.sh` checks 1–4 green; check 5 re-baselined and green.
+- `./scripts/test.sh` passes.
+- `./scripts/bench.sh phase1-tagged-value` ≥1.5× over `phase0-baseline` (target 2–4×).
+- `./scripts/verify.sh` checks 1–4 green; check 5 re-baselined and green.
 
 ---
 
@@ -251,8 +251,8 @@ Resolver currently annotates MapValue AST with `"resolvedName"`, `"resolvedKind"
 
 - Every `make*ToGo` function emits `&Node{...}`; no `NewMapValue` calls in the AST-node emit path (user-level `MapLiteral` map values are unrelated and stay).
 - `evalXxx` Go functions emitted for every node kind, covering today's `evaluateXxx` semantics.
-- `./test.sh` passes; verify.sh checks 1–4 green.
-- `./bench.sh phase2-typed-ast` ≥1.5× over phase1.
+- `./scripts/test.sh` passes; verify.sh checks 1–4 green.
+- `./scripts/bench.sh phase2-typed-ast` ≥1.5× over phase1.
 - Check 5 re-baselined and bit-identical at phase end.
 
 ---
@@ -303,7 +303,7 @@ During IJ→Go transpile, emitter collects every string literal into a global po
 
 - No `Value{tag: tString, s: "..."}` inline literals in emitted Go — all via `strPool`.
 - `null`/`true`/`false` go via singletons.
-- `./bench.sh phase3-intern` ≥1.2× over phase2 (target 1.3–1.8×).
+- `./scripts/bench.sh phase3-intern` ≥1.2× over phase2 (target 1.3–1.8×).
 - All verify.sh checks green.
 
 ---
@@ -364,7 +364,7 @@ Resolver pass already assigns `resolvedKind`. Add slot assignment: per scope, gi
 
 ### Exit criteria
 
-- `./bench.sh phase4-slots` ≥1.3× over phase3.
+- `./scripts/bench.sh phase4-slots` ≥1.3× over phase3.
 - All verify.sh checks green.
 - If still < 10× after P4: document shortfall in `bench.log`; propose tagged-pointer `Value` or bytecode VM as out-of-scope follow-up.
 
@@ -374,14 +374,14 @@ Resolver pass already assigns `resolvedKind`. Add slot assignment: per scope, gi
 
 ### Per-phase gate (run before merge)
 
-1. `./test.sh` — golden test suite passes.
-2. `./src/verify.sh` — checks 1–4 green (functional, golden, MCP, JSON-RPC).
-3. `./src/verify.sh` — check 5 bit-identical fixed-point. Capture new baseline at phase start (`--capture`), confirm bit-identical at phase end.
-4. `./bench.sh phaseN-<name>` — speedup ≥ phase's exit-criteria threshold. Drop-rule: revert if regress vs predecessor.
+1. `./scripts/test.sh` — golden test suite passes.
+2. `./scripts/verify.sh` — checks 1–4 green (functional, golden, MCP, JSON-RPC).
+3. `./scripts/verify.sh` — check 5 bit-identical fixed-point. Capture new baseline at phase start (`--capture`), confirm bit-identical at phase end.
+4. `./scripts/bench.sh phaseN-<name>` — speedup ≥ phase's exit-criteria threshold. Drop-rule: revert if regress vs predecessor.
 
 ### Benchmarks
 
-Primary: `selfhosted_interpreter.sh sample.s` (existing, documented headline metric).
+Primary: `scripts/selfhosted_interpreter.sh sample.s` (existing, documented headline metric).
 
 Secondary (new file `src/bench_eval.s`):
 
@@ -419,9 +419,9 @@ puts(xs[0]);
 puts(xs[49]);
 ```
 
-Wired into `bench.sh` as a fourth timed block. Catches eval-path regressions sample.s under-represents.
+Wired into `scripts/bench.sh` as a fourth timed block. Catches eval-path regressions sample.s under-represents.
 
-Native check (`native_interpreter.sh src/sample.s`) tracked as regression detector — should stay flat.
+Native check (`scripts/native_interpreter.sh src/sample.s`) tracked as regression detector — should stay flat.
 
 ### Bench labels
 
@@ -442,7 +442,7 @@ Native check (`native_interpreter.sh src/sample.s`) tracked as regression detect
 
 ## Rollout
 
-1. Branch off `main`. Capture verify.sh baseline + `bench.sh phase0-baseline`.
+1. Branch off `main`. Capture verify.sh baseline + `scripts/bench.sh phase0-baseline`.
 2. Land P1 — tagged-union Value — series of commits. Final commit re-baselines check 5, logs `phase1-tagged-value`. Merge.
 3. Land P2 — typed AST nodes. Largest phase. Same protocol. Log `phase2-typed-ast`. Merge.
 4. Land P3 — interning + singletons. Log `phase3-intern`. Merge.

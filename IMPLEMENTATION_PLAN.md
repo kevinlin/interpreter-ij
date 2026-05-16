@@ -5,11 +5,11 @@ Status: **Phase 0 complete, starting Phase 1**
 ## Phase 0 — Baseline Capture ✅
 
 - [x] Task 0.1: Capture verify.sh golden + bench baseline — commit `d04bdf9`
-- [x] Task 0.2: Add eval-heavy secondary benchmark (`src/bench_eval.s`) + extend `bench.sh`
+- [x] Task 0.2: Add eval-heavy secondary benchmark (`src/bench_eval.s`) + extend `scripts/bench.sh`
 
 Baseline measurements (macOS/arm64):
-- selfhosted_interpreter.sh sample.s: ~1m16s real
-- selfhosted_interpreter.sh bench_eval.s: ~1m25s real (fib(22) + bubbleSort(30))
+- scripts/selfhosted_interpreter.sh sample.s: ~1m16s real
+- scripts/selfhosted_interpreter.sh bench_eval.s: ~1m25s real (fib(22) + bubbleSort(30))
 
 ## Phase 1 — Tagged-Union Value 🔄
 

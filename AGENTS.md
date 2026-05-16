@@ -6,7 +6,7 @@ Succinct rules for how to BUILD the project:
 
 Run these after implementing to get immediate feedback:
 
-- Tests: `src/verify.sh`
+- Tests: `scripts/verify.sh`
 
 ## Operational Notes
 

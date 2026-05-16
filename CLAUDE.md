@@ -8,8 +8,8 @@ A self-hosting interpreter + transpiler for the IJ language. `src/interpreter.s`
 
 Repo layout:
 - `src/*.s` — IJ source: `interpreter.s` (transpiler + tree-walker), `eval.s` + `mcp.s` (MCP server overlay), `test.s`, `sample.s`.
-- `src/*.sh` — compile, verify, bench, MCP, and native driver scripts.
-- `*.sh` at root — convenience drivers (`build.sh`, `interpreter.sh`, `selfhosted_interpreter.sh`, `test.sh`).
+- `src/*.sh` — compile, MCP, and native driver scripts.
+- `scripts/*.sh` — convenience drivers (`build.sh`, `interpreter.sh`, `selfhosted_interpreter.sh`, `test.sh`, `verify.sh`, `bench.sh`, etc.).
 - `interpreter_{mac_arm64,linux_amd64}`, `mcp_{mac_arm64,linux_amd64}` — committed native binaries at repo root.
 - No `go.mod`; transpiled Go is emitted as a single `app.go` and built directly.
 
@@ -17,29 +17,29 @@ Repo layout:
 
 ```bash
 # Run an IJ script with the native interpreter (fastest)
-echo | ./native_interpreter.sh src/sample.s
-echo "puts(22/7.0)" | ./native_interpreter.sh           # stdin program
+echo | ./scripts/native_interpreter.sh src/sample.s
+echo "puts(22/7.0)" | ./scripts/native_interpreter.sh           # stdin program
 
 # Run via the IJ-implemented interpreter (native runs interpreter.s, which runs your script)
-echo | ./interpreter.sh src/sample.s
+echo | ./scripts/interpreter.sh src/sample.s
 
 # Run via the self-hosted interpreter (interpreter inside interpreter — slow perf benchmark)
-echo hi | ./selfhosted_interpreter.sh src/sample.s
+echo hi | ./scripts/selfhosted_interpreter.sh src/sample.s
 
 # Dump AST as JSON
-./native_ast.sh src/sample.s     # uses pre-built binary
-./ast.sh src/sample.s            # uses interpreter.s
+./scripts/native_ast.sh src/sample.s     # uses pre-built binary
+./scripts/ast.sh src/sample.s            # uses interpreter.s
 
 # Test suite (regression suite written in IJ)
-./test.sh
-# or:  echo | ./native_interpreter.sh src/test.s
+./scripts/test.sh
+# or:  echo | ./scripts/native_interpreter.sh src/test.s
 
 # 5-check regression harness — run after any change to interpreter.s
-./src/verify.sh                # compares against /tmp/ij-golden
-./src/verify.sh --capture      # (re)capture golden outputs
+./scripts/verify.sh                # compares against /tmp/ij-golden
+./scripts/verify.sh --capture      # (re)capture golden outputs
 
 # Benchmark (appends timings to ./bench.log)
-./bench.sh [label]
+./scripts/bench.sh [label]
 ```
 
 Compile IJ to a native binary:
@@ -57,14 +57,14 @@ Compile IJ to a native binary:
 
 # Full rebuild: re-transpile interpreter.s twice (self-bootstrap), run tests,
 # rebuild MCP. Silently skips the Go build when Docker is unreachable.
-./build.sh
+./scripts/build.sh
 ```
 
 MCP server (LLM-callable IJ eval over stdio JSON-RPC):
 
 ```bash
-./mcp.sh            # interpreted (rebuilds mcp_eval.s and runs it)
-./native_mcp.sh  # pre-built native binary
+./scripts/mcp.sh            # interpreted (rebuilds mcp_eval.s and runs it)
+./scripts/native_mcp.sh  # pre-built native binary
 ```
 
 ## Big-picture architecture
@@ -75,7 +75,7 @@ IJ source → `interpreter.s` → (lex → parse → AST as nested maps) → eit
 
 ### Stdin sentinel protocol
 
-`interpreter.s` reads source from stdin, with leading/trailing sentinel lines selecting the mode. All wrappers (`native_interpreter.sh`, `interpreter.sh`, `ast.sh`, etc.) inject the markers around the user's file:
+`interpreter.s` reads source from stdin, with leading/trailing sentinel lines selecting the mode. All wrappers (`scripts/native_interpreter.sh`, `scripts/interpreter.sh`, `scripts/ast.sh`, etc.) inject the markers around the user's file:
 
 | Marker (last line) | Mode |
 |---|---|
@@ -88,7 +88,7 @@ IJ source → `interpreter.s` → (lex → parse → AST as nested maps) → eit
 
 ### MCP server build
 
-`mcp.sh` strips the bootstrap suffix from `interpreter.s` via `until.rb "interpreter is ready"` to make `interpreter_base.s`, then concatenates with `eval.s` + `mcp.s` into `mcp_eval.s` and runs it. The native MCP binary is built by transpiling `mcp_eval.s` (see `build.sh`). `eval.s` and `mcp.s` override `gets`/`puts`/`StdIOLibraryFunctionsInitializer` so the inner-interpreter can be fed scripts and have its output captured per JSON-RPC request — i.e. MCP is a second consumer of the same transpiler and is sensitive to the IJ "override pattern" (`let oldX = X; def X(...) { ... }`).
+`scripts/mcp.sh` strips the bootstrap suffix from `interpreter.s` via `until.rb "interpreter is ready"` to make `interpreter_base.s`, then concatenates with `eval.s` + `mcp.s` into `mcp_eval.s` and runs it. The native MCP binary is built by transpiling `mcp_eval.s` (see `scripts/build.sh`). `eval.s` and `mcp.s` override `gets`/`puts`/`StdIOLibraryFunctionsInitializer` so the inner-interpreter can be fed scripts and have its output captured per JSON-RPC request — i.e. MCP is a second consumer of the same transpiler and is sensitive to the IJ "override pattern" (`let oldX = X; def X(...) { ... }`).
 
 ### Performance machinery in the transpiler
 
@@ -100,20 +100,20 @@ A resolver pass annotates AST nodes with whether identifiers are parameters, loc
 - `if`/`while` condition slots use raw-`bool` helpers (`EqualsBool`, `LessThanBool`, …) that avoid heap-allocating a `BoolValue`.
 - Arithmetic was tried and **reverted** — the helper indirection regressed the benchmark.
 
-If you touch the transpiler, the load-bearing invariant is that two consecutive `compile-local.sh interpreter.s …` runs produce **bit-identical** binaries. `verify.sh` check 5 enforces this.
+If you touch the transpiler, the load-bearing invariant is that two consecutive `compile-local.sh interpreter.s …` runs produce **bit-identical** binaries. `scripts/verify.sh` check 5 enforces this.
 
 ## Verification discipline
 
-`verify.sh` runs five checks and exits non-zero on any regression:
+`scripts/verify.sh` runs five checks and exits non-zero on any regression:
 
-1. `test.s` via `interpreter.sh` matches golden.
-2. `test.s` via `selfhosted_interpreter.sh` matches golden.
-3. `sample.s` via `selfhosted_interpreter.sh` matches golden.
+1. `test.s` via `scripts/interpreter.sh` matches golden.
+2. `test.s` via `scripts/selfhosted_interpreter.sh` matches golden.
+3. `sample.s` via `scripts/selfhosted_interpreter.sh` matches golden.
 4. Native MCP JSON-RPC responses match golden.
 5. **Double self-transpile fixed-point** — `compile-local.sh interpreter.s` twice; binaries must be bit-identical.
 
-Run `./src/verify.sh --capture` once on a clean baseline before working on a perf or codegen change so checks 1–4 have a golden to diff against. Check 5 needs no golden.
-- Check 5 needs `compile-local.sh` (Docker-less). The Docker-backed `compile-mac.sh` will silently skip the Go build step if the Docker daemon is unreachable, which would mask regressions — `build.sh` has this same hazard. Use `compile-local.sh` for any verification that needs hard failures.
+Run `./scripts/verify.sh --capture` once on a clean baseline before working on a perf or codegen change so checks 1–4 have a golden to diff against. Check 5 needs no golden.
+- Check 5 needs `compile-local.sh` (Docker-less). The Docker-backed `compile-mac.sh` will silently skip the Go build step if the Docker daemon is unreachable, which would mask regressions — `scripts/build.sh` has this same hazard. Use `compile-local.sh` for any verification that needs hard failures.
 
 ## Language quirks worth remembering
 

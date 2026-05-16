@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `./bench.sh` self-hosted run at least 10× faster (≤ 7s wall on macOS/arm64), without breaking the self-bootstrap fixed-point or any functional check.
+**Goal:** Make `./scripts/bench.sh` self-hosted run at least 10× faster (≤ 7s wall on macOS/arm64), without breaking the self-bootstrap fixed-point or any functional check.
 
 **Architecture:** Phased refactor of the emitted Go runtime + the codegen inside `interpreter.s`. P1 swaps the `Value` interface for a tagged-union struct. P2 replaces MapValue-backed AST nodes with typed Go structs in the transpiled output. P3 adds a global string pool + null/bool/small-int singletons. P4 (conditional) replaces map-backed Contexts with slot-indexed slices.
 
@@ -19,16 +19,16 @@
 **Build pipeline assumptions:**
 - `./src/compile-local.sh src/interpreter.s /tmp/ij_stage1` produces a fresh native binary using the host Go toolchain. Use this — never the Docker path during this work.
 - The committed binary at repo root (`interpreter_mac_arm64`) is replaced once per phase, after the phase's final verify.sh check passes.
-- Each phase ends with `./bench.sh phaseN-<name>` appending labeled timings to `bench.log`.
+- Each phase ends with `./scripts/bench.sh phaseN-<name>` appending labeled timings to `bench.log`.
 
 **Per-commit gate (every commit on the feature branch must pass):**
-- `./test.sh` — golden tests pass.
-- `./src/verify.sh` runs checks 1–4 green. Check 5 may be skipped/non-green mid-phase but **must** be re-baselined and green before merging the phase.
+- `./scripts/test.sh` — golden tests pass.
+- `./scripts/verify.sh` runs checks 1–4 green. Check 5 may be skipped/non-green mid-phase but **must** be re-baselined and green before merging the phase.
 
-**Drop-rule:** if `./bench.sh phaseN-<name>` shows < 1.3× over the previous phase, revert the phase commits and stop. No "but it should be faster" excuses (the README's D4 lesson).
+**Drop-rule:** if `./scripts/bench.sh phaseN-<name>` shows < 1.3× over the previous phase, revert the phase commits and stop. No "but it should be faster" excuses (the README's D4 lesson).
 
 **Re-baselining check 5 mid-phase:**
-- `./src/verify.sh --capture` at phase start, recording any new emitted-Go fingerprints.
+- `./scripts/verify.sh --capture` at phase start, recording any new emitted-Go fingerprints.
 - After the phase's last functional commit, re-run `./src/compile-local.sh src/interpreter.s /tmp/ij_stage1` and `./src/compile-local.sh src/interpreter.s /tmp/ij_stage2` then `diff /tmp/ij_stage1 /tmp/ij_stage2`. Must be byte-identical.
 
 ---
@@ -38,8 +38,8 @@
 This refactor edits a small set of files repeatedly. No new IJ source files except the new benchmark.
 
 - Modify: `src/interpreter.s` — the only file in 99% of tasks. Contains both the runtime-type emit block (~5159–6342) and every `*ToGo` codegen function (~70–4843).
-- Modify: `bench.sh` (root) — extend to also run the new `bench_eval.s`.
-- Modify: `src/verify.sh` — only if new golden capture sites are needed (not expected).
+- Modify: `scripts/bench.sh` — extend to also run the new `bench_eval.s`.
+- Modify: `scripts/verify.sh` — only if new golden capture sites are needed (not expected).
 - Modify: `README.md` — perf section update at the end.
 - Create: `src/bench_eval.s` — eval-heavy secondary benchmark.
 - Modify: `interpreter_mac_arm64`, `interpreter_linux_amd64`, `mcp_mac_arm64`, `mcp_linux_amd64` (committed binaries, regenerated at phase end).
@@ -65,12 +65,12 @@ Expected: clean working tree (or only the new plan + spec docs).
 
 - [ ] **Step 2: Capture verify.sh golden outputs**
 
-Run: `./src/verify.sh --capture`
+Run: `./scripts/verify.sh --capture`
 Expected: prints the captured checks, exits 0.
 
 - [ ] **Step 3: Run baseline benchmark**
 
-Run: `./bench.sh phase0-baseline`
+Run: `./scripts/bench.sh phase0-baseline`
 Expected: three timing blocks appended to `bench.log` (selfhosted, interpreter.sh, native_interpreter.sh). Record the `real` time for `selfhosted_interpreter.sh sample.s` — that's the headline number.
 
 - [ ] **Step 4: Verify check 5 fixed-point on the baseline**
@@ -96,7 +96,7 @@ git commit -m "perf: phase0 baseline capture + design + plan"
 
 **Files:**
 - Create: `src/bench_eval.s`
-- Modify: `bench.sh` (root)
+- Modify: `scripts/bench.sh`
 
 - [ ] **Step 1: Create `src/bench_eval.s`**
 
@@ -139,29 +139,29 @@ puts(xs[29]);
 
 - [ ] **Step 2: Verify bench_eval.s runs natively**
 
-Run: `echo | ./src/native_interpreter.sh src/bench_eval.s`
+Run: `echo | ./scripts/native_interpreter.sh src/bench_eval.s`
 Expected: prints `17711`, `1`, `30` (or whatever the actual output is — capture it now as the golden value).
 
-- [ ] **Step 3: Extend `bench.sh` to time bench_eval.s**
+- [ ] **Step 3: Extend `scripts/bench.sh` to time bench_eval.s**
 
-Modify `bench.sh`. Inside the `{ ... } | tee -a "$LOG"` block, after the existing native_interpreter timing, add:
+Modify `scripts/bench.sh`. Inside the `{ ... } | tee -a "$LOG"` block, after the existing native_interpreter timing, add:
 
 ```bash
   echo "-- selfhosted_interpreter.sh bench_eval.s --"
-  { time (echo | ./selfhosted_interpreter.sh src/bench_eval.s >/dev/null); } 2>&1
+  { time (echo | ./scripts/selfhosted_interpreter.sh src/bench_eval.s >/dev/null); } 2>&1
   echo "-- native_interpreter.sh bench_eval.s --"
-  { time (echo | src/native_interpreter.sh src/bench_eval.s >/dev/null); } 2>&1
+  { time (echo | ./scripts/native_interpreter.sh src/bench_eval.s >/dev/null); } 2>&1
 ```
 
 - [ ] **Step 4: Re-run baseline with eval bench**
 
-Run: `./bench.sh phase0-baseline-eval`
+Run: `./scripts/bench.sh phase0-baseline-eval`
 Expected: five timing blocks in `bench.log`. Record the selfhosted_interpreter.sh bench_eval.s `real` time as the eval baseline.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/bench_eval.s bench.sh bench.log
+git add src/bench_eval.s scripts/bench.sh bench.log
 git commit -m "bench: add eval-heavy secondary benchmark"
 ```
 
@@ -171,7 +171,7 @@ git commit -m "bench: add eval-heavy secondary benchmark"
 
 Replace the emitted Go `Value` interface + per-type structs (`IntValue`, `DoubleValue`, `StringValue`, `BoolValue`, `InvalidValue`) with a single tagged-union struct `Value{ tag, b, i, d, s, arr, m, cmd }`. `ArrayValue` and `MapValue` stay as separate types but are wrapped in `Value` when stored as a `Value`-typed slot.
 
-**Build invariant:** the runtime is staticly typed Go. Cannot half-migrate. P1 is one large coordinated change landing across many small commits on the feature branch, with intermediate commits potentially leaving `app.go` non-compiling — those commits skip `./test.sh` but must compile a stub witness file. The phase-end commit must be fully green on checks 1–5.
+**Build invariant:** the runtime is staticly typed Go. Cannot half-migrate. P1 is one large coordinated change landing across many small commits on the feature branch, with intermediate commits potentially leaving `app.go` non-compiling — those commits skip `./scripts/test.sh` but must compile a stub witness file. The phase-end commit must be fully green on checks 1–5.
 
 **Realistic compromise:** structure P1 as a sequence where each commit *does* build green. Achieve this by introducing the new shape **alongside** the old, switching emit sites in one atomic commit, then removing the old types in a final commit.
 
@@ -224,10 +224,10 @@ Expected: build succeeds (Value2 is defined but unused, Go allows unused types).
 
 - [ ] **Step 4: Run functional checks**
 
-Run: `./test.sh`
+Run: `./scripts/test.sh`
 Expected: PASS (no behavioral change yet — only added types).
 
-Run: `./src/verify.sh`
+Run: `./scripts/verify.sh`
 Expected: checks 1–4 pass. Check 5 will fail (different emitted Go) — that's allowed mid-phase.
 
 - [ ] **Step 5: Commit**
@@ -338,7 +338,7 @@ Expected: build succeeds. New methods exist on Value2 but no caller yet.
 
 - [ ] **Step 3: Functional check**
 
-Run: `./test.sh`
+Run: `./scripts/test.sh`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
@@ -373,7 +373,7 @@ puts("func vInvalidV(reason string) Value2 { return Value2{tag: tInvalid, inv: r
 
 - [ ] **Step 2: Build + commit**
 
-Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p1_t3 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p1_t3 && ./scripts/test.sh`
 Expected: build + tests pass.
 
 ```bash
@@ -543,10 +543,10 @@ Expected: build succeeds. Any compile errors here mean an emit site was missed. 
 
 - [ ] **Step 3: Functional checks**
 
-Run: `./test.sh`
+Run: `./scripts/test.sh`
 Expected: PASS.
 
-Run: `./src/verify.sh`
+Run: `./scripts/verify.sh`
 Expected: checks 1–4 PASS. Check 5 will fail (different fingerprints) — re-baseline at end of phase.
 
 - [ ] **Step 4: Replace committed binary**
@@ -557,7 +557,7 @@ Run:
 ```
 Expected: a new native binary at repo root.
 
-Verify it works: `echo hi | ./selfhosted_interpreter.sh src/sample.s`
+Verify it works: `echo hi | ./scripts/selfhosted_interpreter.sh src/sample.s`
 Expected: prints the same greeting output as before.
 
 - [ ] **Step 5: Commit**
@@ -597,7 +597,7 @@ Same pattern for `LessThanBool` etc. — compare via the appropriate field once 
 
 - [ ] **Step 2: Build + functional check**
 
-Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./scripts/test.sh`
 Expected: pass.
 
 - [ ] **Step 3: Commit**
@@ -626,7 +626,7 @@ Locate `infixExpressionToGo` (~911) and any other place emitting `ij_foo_impl(ct
 
 - [ ] **Step 3: Build, test**
 
-Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./scripts/test.sh`
 Expected: pass.
 
 - [ ] **Step 4: Commit**
@@ -680,7 +680,7 @@ Expected: `0`.
 
 - [ ] **Step 4: Build, test**
 
-Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./test.sh && ./src/verify.sh`
+Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./scripts/test.sh && ./scripts/verify.sh`
 Expected: checks 1–4 PASS. Check 5 still fails — re-baseline next.
 
 - [ ] **Step 5: Re-baseline check 5**
@@ -697,15 +697,15 @@ If diff non-empty, investigate the source of non-determinism (likely map-iterati
 
 - [ ] **Step 6: Verify all 5 checks**
 
-Run: `./src/verify.sh`
+Run: `./scripts/verify.sh`
 Expected: all 5 checks PASS.
 
 - [ ] **Step 7: Rebuild MCP binary**
 
 The MCP binary is built from `mcp_eval.s` which concatenates `interpreter.s` (trimmed) with `eval.s` + `mcp.s`. The build script handles this:
 
-Run: `./src/mcp.sh` (interpreted, sanity check). Stop it once it accepts on stdin.
-Run: `./build.sh` (rebuilds everything including native MCP).
+Run: `./scripts/mcp.sh` (interpreted, sanity check). Stop it once it accepts on stdin.
+Run: `./scripts/build.sh` (rebuilds everything including native MCP).
 
 Expected: completes without errors. `mcp_mac_arm64` (and linux variant if cross-compile available) updated.
 
@@ -724,7 +724,7 @@ git commit -m "perf/p1: remove old Value interface, rename Value2 -> Value"
 
 - [ ] **Step 1: Run bench**
 
-Run: `./bench.sh phase1-tagged-value`
+Run: `./scripts/bench.sh phase1-tagged-value`
 Expected: timings appended to `bench.log`. Compare `real` time of selfhosted_interpreter.sh sample.s vs phase0-baseline.
 
 - [ ] **Step 2: Compute speedup**
@@ -763,7 +763,7 @@ git rebase main
 
 ## Phase 2 — Typed AST Struct Nodes
 
-Replace MapValue-backed AST nodes with typed Go struct nodes in the transpiled program. The IJ-side parser still builds MapValues (needed for the interpreter.s author's mental model and for the `interpreter.sh` tree-walking path). Only the **transpile output** changes shape.
+Replace MapValue-backed AST nodes with typed Go struct nodes in the transpiled program. The IJ-side parser still builds MapValues (needed for the interpreter.s author's mental model and for the `scripts/interpreter.sh` tree-walking path). Only the **transpile output** changes shape.
 
 This phase emits, in the Go runtime, a `Node` struct and ~20 `evalXxx` functions; rewrites every `*ToGo` codegen function to produce `&Node{kind: ..., ...}` literals instead of `NewMapValue(...)` literals; and updates `blockStatementToGo` / `functionDeclarationToGo` / etc. so the emitted statement-level Go consumes `*Node` rather than the old map-callable pattern.
 
@@ -841,7 +841,7 @@ puts("}");
 
 - [ ] **Step 2: Build + test (no callers yet — should be a no-op)**
 
-Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_t1 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_t1 && ./scripts/test.sh`
 Expected: pass. Go will warn about unused types but not error.
 
 - [ ] **Step 3: Commit**
@@ -1217,7 +1217,7 @@ Patch the Value struct emit (Task 1.1's Step 2 — already merged; re-edit it no
 
 - [ ] **Step 5: Build + test**
 
-Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_t7 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_t7 && ./scripts/test.sh`
 Expected: pass (no behavior change — old MapValue codegen still drives, new path unused).
 
 - [ ] **Step 6: Commit**
@@ -1280,7 +1280,7 @@ def numberLiteralToGo(self) {
 
 - [ ] **Step 2: Build, test**
 
-Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_t8_1 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_t8_1 && ./scripts/test.sh`
 Expected: builds but tests may FAIL because the rest of the codegen still emits `NewMapValue(...)` for statement-level wrappers (e.g. `ExpressionStatement`) that expect their child to be a MapValue, not a `*Node`. This is the half-migrated state.
 
 **Decision:** the codegen MUST be migrated atomically across all node kinds in one commit. The `*ToGo` switch can't be done one kind at a time because the parent codegen consumes whatever the child emits.
@@ -1435,19 +1435,19 @@ Expected: build succeeds. Most likely first attempt has compile errors — fix i
 
 - [ ] **Step 4: Run test.sh**
 
-Run: `./test.sh`
+Run: `./scripts/test.sh`
 Expected: PASS.
 
-If sample.s output differs, run `./src/native_ast.sh src/sample.s` to dump the AST, compare against the pre-change dump (run with old binary first), and trace the divergence.
+If sample.s output differs, run `./scripts/native_ast.sh src/sample.s` to dump the AST, compare against the pre-change dump (run with old binary first), and trace the divergence.
 
 - [ ] **Step 5: Run sample.s through self-hosted**
 
-Run: `echo hi | ./selfhosted_interpreter.sh src/sample.s`
-Expected: same greeting output as before. Time it: `time echo hi | ./selfhosted_interpreter.sh src/sample.s` — this is the first peek at P2's speedup.
+Run: `echo hi | ./scripts/selfhosted_interpreter.sh src/sample.s`
+Expected: same greeting output as before. Time it: `time echo hi | ./scripts/selfhosted_interpreter.sh src/sample.s` — this is the first peek at P2's speedup.
 
 - [ ] **Step 6: Run verify.sh**
 
-Run: `./src/verify.sh`
+Run: `./scripts/verify.sh`
 Expected: checks 1–4 PASS. Check 5 fails — re-baseline at phase end.
 
 - [ ] **Step 7: Re-baseline check 5**
@@ -1465,7 +1465,7 @@ Expected: `OK`. If not, fix non-determinism (likely map-iteration order in opCod
 Run:
 ```bash
 ./src/compile-local.sh src/interpreter.s interpreter_mac_arm64
-./build.sh    # rebuilds MCP via mcp_eval.s
+./scripts/build.sh    # rebuilds MCP via mcp_eval.s
 ```
 Expected: binary at repo root + mcp_mac_arm64 updated.
 
@@ -1484,7 +1484,7 @@ git commit -m "perf/p2: switch all *ToGo emitters to typed Node literals; elimin
 
 - [ ] **Step 1: Run bench**
 
-Run: `./bench.sh phase2-typed-ast`
+Run: `./scripts/bench.sh phase2-typed-ast`
 Expected: new timing block. Compute speedup vs `phase1-tagged-value`. Target ≥1.5×.
 
 - [ ] **Step 2: Drop-rule check**
@@ -1537,7 +1537,7 @@ puts("func vStrPool(idx uint32) Value { return strPool[idx] }");
 
 - [ ] **Step 2: Build + commit**
 
-Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p3_t1 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p3_t1 && ./scripts/test.sh`
 Expected: pass.
 
 ```bash
@@ -1631,7 +1631,7 @@ puts("case nkNullLit: return vNull");
 
 - [ ] **Step 6: Build + test**
 
-Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p3_t2 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p3_t2 && ./scripts/test.sh`
 Expected: pass.
 
 - [ ] **Step 7: Verify determinism of strPool order**
@@ -1646,7 +1646,7 @@ Expected: `OK`. If diff non-empty, the strPool ordering depends on map iteration
 
 - [ ] **Step 8: Replace committed binary + MCP**
 
-Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./build.sh`
+Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./scripts/build.sh`
 
 - [ ] **Step 9: Commit**
 
@@ -1661,7 +1661,7 @@ git commit -m "perf/p3: intern string literals into strPool, route bool/null/sma
 
 - [ ] **Step 1: Bench**
 
-Run: `./bench.sh phase3-intern`
+Run: `./scripts/bench.sh phase3-intern`
 Expected: timing block appended. Speedup vs P2 ≥ 1.2× (target 1.3–1.8×).
 
 - [ ] **Step 2: Drop-rule**
@@ -1713,7 +1713,7 @@ In `variableDeclarationToGo` and `functionDeclarationToGo`, similarly emit slot 
 
 - [ ] **Step 3: Build, test**
 
-Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p4_t1 && ./test.sh`
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p4_t1 && ./scripts/test.sh`
 Expected: pass (resolvedSlot is carried but not yet consumed).
 
 - [ ] **Step 4: Commit**
@@ -1775,8 +1775,8 @@ puts("}");
 
 - [ ] **Step 4: Build, test**
 
-Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./test.sh`
-Expected: pass. If failures appear, walk the failing test, dump AST with `src/native_ast.sh`, identify any node where `resolvedSlot` is not set when expected.
+Run: `./src/compile-local.sh src/interpreter.s interpreter_mac_arm64 && ./scripts/test.sh`
+Expected: pass. If failures appear, walk the failing test, dump AST with `scripts/native_ast.sh`, identify any node where `resolvedSlot` is not set when expected.
 
 - [ ] **Step 5: Re-baseline check 5**
 
@@ -1790,12 +1790,12 @@ Expected: `OK`.
 
 - [ ] **Step 6: Run verify.sh**
 
-Run: `./src/verify.sh`
+Run: `./scripts/verify.sh`
 Expected: all 5 checks PASS.
 
 - [ ] **Step 7: Rebuild MCP**
 
-Run: `./build.sh`
+Run: `./scripts/build.sh`
 
 - [ ] **Step 8: Commit**
 
@@ -1810,7 +1810,7 @@ git commit -m "perf/p4: slot-indexed local/param Context access"
 
 - [ ] **Step 1: Bench**
 
-Run: `./bench.sh phase4-slots`
+Run: `./scripts/bench.sh phase4-slots`
 Expected: speedup ≥ 1.3× over P3.
 
 - [ ] **Step 2: Drop-rule**
@@ -1860,12 +1860,12 @@ git commit -m "docs: update perf section with phase1-4 results"
 
 - [ ] **Step 1: Final 5-check run**
 
-Run: `./src/verify.sh`
+Run: `./scripts/verify.sh`
 Expected: all 5 PASS.
 
 - [ ] **Step 2: Final bench**
 
-Run: `./bench.sh final`
+Run: `./scripts/bench.sh final`
 Expected: timing block appended. Record cumulative speedup vs phase0-baseline.
 
 - [ ] **Step 3: Commit**
@@ -1895,7 +1895,7 @@ Run through the plan once with fresh eyes before handing off.
 - ✅ String interning + singletons (design §Phase 3) → Plan §Phase 3, tasks 3.1–3.3.
 - ✅ Slot-indexed contexts (design §Phase 4) → Plan §Phase 4, tasks 4.1–4.3.
 - ✅ Primary benchmark (selfhosted_interpreter.sh sample.s) → exercised in every bench task.
-- ✅ Secondary benchmark (src/bench_eval.s) → created in Task 0.2, wired into bench.sh.
+- ✅ Secondary benchmark (src/bench_eval.s) → created in Task 0.2, wired into scripts/bench.sh.
 - ✅ Per-phase exit criteria (≥1.3× drop-rule) → enforced in every "Benchmark Phase N" task.
 - ✅ Check 5 may break mid-phase, re-baselined at phase end → enforced in Tasks 1.7, 2.8, 3.2, 4.2.
 - ✅ Use compile-local.sh not Docker → every build step uses compile-local.sh.

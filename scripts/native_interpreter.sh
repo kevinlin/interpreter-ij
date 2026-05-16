@@ -23,7 +23,8 @@ case "$ARCH" in
 esac
 
 # Construct binary name
-BINARY="$SCRIPT_DIR/mcp_${OS_NAME}_${ARCH_NAME}"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BINARY="$ROOT_DIR/interpreter_${OS_NAME}_${ARCH_NAME}"
 
 # Check if the binary exists
 if [[ ! -x "$BINARY" ]]; then
@@ -31,4 +32,4 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-"$BINARY"
+(echo "//multiline" && cat $1 && echo "//<EOF>" && cat) | "$BINARY"
