@@ -769,11 +769,11 @@ def assignmentStatementToGo(self) {
         // Mirror globals back to ctx so dynamic access (ctx.Get from
         // unresolved paths) stays coherent.
         if (isGlobal) {
-            print('; ctx.Update("' + self["name"] + '", ' + self["resolvedName"] + ')');
+            print('; ctx2.Update("' + self["name"] + '", ' + self["resolvedName"] + ')');
         }
         return null;
     }
-    print('ctx.Update("'+self["name"]+'", ');
+    print('ctx2.Update("'+self["name"]+'", ');
     if (self["value"]["toGo"] != null) {
         self["value"]["toGo"](self["value"])
     }
@@ -1205,12 +1205,12 @@ def blockStatementToGo(self) {
 
     puts("{");
     if (hasLocal) {
-        puts("ctx := NewContext(ctx)");
-        puts('if ctx == nil {'); //dirty hack to avoid declared and not used: ctx error
+        puts("ctx2 := NewContext2(ctx2)");
+        puts('if ctx2 == nil {'); //dirty hack to avoid declared and not used: ctx error
         puts('    fmt.Println("NOOP");');
         puts('}');
     } else {
-        puts("_ = ctx");
+        puts("_ = ctx2");
     }
 
     let i = 0;
@@ -1858,8 +1858,8 @@ def functionDeclarationToGo(self) {
     // D1: use NewStaticFunctionCommand when the body has been analyzed as
     // ctx-free, letting Execute reuse the caller's ctx instead of allocating
     // a fresh Context per invocation.
-    let ctor = "NewFunctionCommand";
-    if (self["resolvedIsStatic"] == true) { ctor = "NewStaticFunctionCommand"; }
+    let ctor = "NewFunctionCommand2";
+    if (self["resolvedIsStatic"] == true) { ctor = "NewStaticFunctionCommand2"; }
 
     // D2: for top-level static defs, emit a fixed-arity package-level Go
     // function `ij_<name>_impl(ctx, ij_arg0, ...)` that callers can invoke
@@ -1882,35 +1882,35 @@ def functionDeclarationToGo(self) {
         transpilerStaticImpls[self["name"]] = pn;
         push(transpilerImplQueue, self);
 
-        puts(self["resolvedName"] + ' = NewStaticFunctionCommand(ctx,func(ctx *Context, params *ArrayValue) Value {');
+        puts(self["resolvedName"] + ' = v2Func(NewStaticFunctionCommand2(ctx2,func(ctx2 *Context2, params *ArrayValue2) Value2 {');
         let ci = 0;
         let forwardArgs = "";
         while (ci < pn) {
             if (ci > 0) { forwardArgs = forwardArgs + ","; }
-            forwardArgs = forwardArgs + "params.Get(IntValue{val: " + intString(ci) + "})";
+            forwardArgs = forwardArgs + "params.Get(Value2{tag: t2Int, i: " + intString(ci) + "})";
             ci = ci + 1;
         }
         let sep = "";
         if (pn > 0) { sep = ","; }
-        puts('return ' + self["resolvedName"] + '_impl(ctx' + sep + forwardArgs + ')');
-        puts('})');
-        puts('ctx.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
+        puts('return ' + self["resolvedName"] + '_impl(ctx2' + sep + forwardArgs + ')');
+        puts('}))');
+        puts('ctx2.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
         return null;
     }
 
     if (atRoot) {
-        puts(self["resolvedName"] + ' = ' + ctor + '(ctx,func(ctx *Context, params *ArrayValue) (result Value) {');
+        puts(self["resolvedName"] + ' = v2Func(' + ctor + '(ctx2,func(ctx2 *Context2, params *ArrayValue2) (result Value2) {');
     } else {
-        puts('ctx.Create("' + self["name"] + '", ' + ctor + '(ctx,func(ctx *Context, params *ArrayValue) (result Value) {');
+        puts('ctx2.Create("' + self["name"] + '", v2Func(' + ctor + '(ctx2,func(ctx2 *Context2, params *ArrayValue2) (result Value2) {');
     }
-    puts('result=NewNullValue()');
+    puts('result=v2Null()');
 
     let i = 0;
     while (i < len(self["parameters"])) {
         let param = self["parameters"][i];
         let mangled = mangle(param);
 
-        puts('var ' + mangled + ' Value = params.Get(IntValue{val: ' + intString(i) + '})');
+        puts('var ' + mangled + ' Value2 = params.Get(Value2{tag: t2Int, i: ' + intString(i) + '})');
         puts('_ = ' + mangled);
 
         i = i + 1;
@@ -1930,10 +1930,10 @@ def functionDeclarationToGo(self) {
 
     puts('return result')
     if (atRoot) {
-        puts('})');
-        puts('ctx.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
-    } else {
         puts('}))');
+        puts('ctx2.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
+    } else {
+        puts('})))');
     }
 }
 
@@ -1946,21 +1946,21 @@ def emitQueuedImpls() {
     while (i < n) {
         let self = transpilerImplQueue[i];
         let pn = len(self["parameters"]);
-        let sig = 'func ' + self["resolvedName"] + '_impl(ctx *Context';
+        let sig = 'func ' + self["resolvedName"] + '_impl(ctx2 *Context2';
         let p = 0;
         while (p < pn) {
-            sig = sig + ', ' + mangle(self["parameters"][p]) + ' Value';
+            sig = sig + ', ' + mangle(self["parameters"][p]) + ' Value2';
             p = p + 1;
         }
-        sig = sig + ') (result Value) {';
+        sig = sig + ') (result Value2) {';
         puts(sig);
-        puts('_ = ctx');
+        puts('_ = ctx2');
         let q = 0;
         while (q < pn) {
             puts('_ = ' + mangle(self["parameters"][q]));
             q = q + 1;
         }
-        puts('result=NewNullValue()');
+        puts('result=v2Null()');
         let body = self["body"];
         if (body != null) {
             if (body["toGo"] != null) {
@@ -2199,7 +2199,7 @@ def identifierToGo(self) {
             return null;
         }
     }
-    print('ctx.Get("' + self["name"] + '")');
+    print('ctx2.Get("' + self["name"] + '")');
     return null;
 }
 
@@ -3297,7 +3297,7 @@ def CallExpression_toGo(self) {
                     let arity = transpilerStaticImpls[callee["name"]];
                     if (arity != null) {
                         if (arity == argsLen) {
-                            print(mangle(callee["name"]) + '_impl(ctx');
+                            print(mangle(callee["name"]) + '_impl(ctx2');
                             let di = 0;
                             while (di < argsLen) {
                                 print(',');
@@ -3317,7 +3317,7 @@ def CallExpression_toGo(self) {
     }
 
     callee["toGo"](callee);
-    print('.Execute(ctx, NewArrayValue2('); 
+    print('.Execute(ctx2, NewArrayValue2(');
 
     let i = 0;
     while (i < argsLen) {
@@ -4518,7 +4518,7 @@ def makeMapLiteral(pairs, position) {
       if (i > 0) {
         print(",");
       }
-      print('KeyValuePair{Key: ');
+      print('KeyValuePair2{Key: ');
 
       if (keyNode["toGo"] != null) {
         keyNode["toGo"](keyNode)
@@ -4635,7 +4635,7 @@ def makeProgram() {
             let li = 0;
             while (li < len(libs)) {
                 let lname = libs[li];
-                puts(mangle(lname) + ' = ctx.Get("' + lname + '")');
+                puts(mangle(lname) + ' = ctx2.Get("' + lname + '")');
                 li = li + 1;
             }
         }
@@ -4771,7 +4771,7 @@ def variableDeclarationToGo(self) {
     // Function-local lets are emitted as Go vars so references can resolve
     // statically (C4).
     if (self["resolvedAtRoot"] == false) {
-        print('var ' + self["resolvedName"] + ' Value = ');
+        print('var ' + self["resolvedName"] + ' Value2 = ');
         let init = self["initializer"];
         if (init != null) {
             if (init["toGo"] != null) {
@@ -4795,10 +4795,10 @@ def variableDeclarationToGo(self) {
         }
     }
     else {
-        print('NullVal');
+        print('v2Null()');
     }
     puts('');
-    puts('ctx.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
+    puts('ctx2.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
     return null;
 }
 
@@ -5347,6 +5347,305 @@ puts("}");
 puts("func NewStaticFunctionCommand(definitionCtx *Context, fn func(*Context, *ArrayValue) Value) Command {");
 puts("return &FunctionCommand{definitionCtx: definitionCtx, executeFunc: fn, skipCtx: true}");
 puts("}");
+puts("func registerLibraryFunctions2(ctx2 *Context2) {");
+puts("ctx2.Create(" + chr(34) + "puts" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("val := params.Get(Value2{tag: t2Int, i: 0})");
+puts("fmt.Println(val.String())");
+puts("return Value2{tag: t2Int, i: 0}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "gets" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("s, err := stdinReader.ReadString('" + chr(92) + "n')");
+puts("if err != nil {");
+puts("if err == io.EOF {");
+puts("return v2Null()");
+puts("} else {");
+puts("return v2Invalid(" + chr(34) + "gets error: " + chr(34) + " + err.Error())");
+puts("}");
+puts("}");
+puts("s = strings.TrimSuffix(s, " + chr(34) + "" + chr(92) + "n" + chr(34) + ")");
+puts("s = strings.TrimSuffix(s, " + chr(34) + "" + chr(92) + "r" + chr(34) + ")");
+puts("return Value2{tag: t2String, s: s}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "assert" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("if !params.Get(Value2{tag: t2Int, i: 0}).IsTruthy() {");
+puts("fmt.Println(" + chr(34) + "=> FAILED " + chr(34) + ", params.Get(Value2{tag: t2Int, i: 1}).ValueString())");
+puts("}");
+puts("return v2Null()");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "push" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("arr := params.Get(Value2{tag: t2Int, i: 0})");
+puts("if arr.tag != t2Array {");
+puts("return v2Invalid(" + chr(34) + "push: expected array" + chr(34) + ")");
+puts("}");
+puts("ele := params.Get(Value2{tag: t2Int, i: 1})");
+puts("arr.arr.values = append(arr.arr.values, ele)");
+puts("return ele");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "pop" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("arr := params.Get(Value2{tag: t2Int, i: 0})");
+puts("if arr.tag != t2Array {");
+puts("return v2Invalid(" + chr(34) + "pop: expected array" + chr(34) + ")");
+puts("}");
+puts("if len(arr.arr.values) == 0 {");
+puts("return v2Invalid(" + chr(34) + "pop: array is empty" + chr(34) + ")");
+puts("}");
+puts("lastElement := arr.arr.values[len(arr.arr.values)-1]");
+puts("arr.arr.values = arr.arr.values[:len(arr.arr.values)-1]");
+puts("return lastElement");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "join" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("arr := params.Get(Value2{tag: t2Int, i: 0})");
+puts("if arr.tag != t2Array {");
+puts("return v2Invalid(" + chr(34) + "join: expected array" + chr(34) + ")");
+puts("}");
+puts("delim := params.Get(Value2{tag: t2Int, i: 1}).ValueString()");
+puts("strValues := make([]string, len(arr.arr.values))");
+puts("for i, v := range arr.arr.values {");
+puts("strValues[i] = v.ValueString()");
+puts("}");
+puts("joined := strings.Join(strValues, delim)");
+puts("return Value2{tag: t2String, s: joined}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "keys" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("arr := params.Get(Value2{tag: t2Int, i: 0})");
+puts("if arr.tag != t2Map {");
+puts("return v2Invalid(" + chr(34) + "keys: expected map" + chr(34) + ")");
+puts("}");
+puts("keys := make([]Value2, len(arr.m.pairs))");
+puts("i := 0");
+puts("for _, pair := range arr.m.pairs {");
+puts("keys[i] = pair.Key");
+puts("i++");
+puts("}");
+puts("return v2Array(NewArrayValue2(keys...))");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "values" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("arr := params.Get(Value2{tag: t2Int, i: 0})");
+puts("if arr.tag != t2Map {");
+puts("return v2Invalid(" + chr(34) + "values: expected map" + chr(34) + ")");
+puts("}");
+puts("values := make([]Value2, len(arr.m.pairs))");
+puts("i := 0");
+puts("for _, pair := range arr.m.pairs {");
+puts("values[i] = pair.Value");
+puts("i++");
+puts("}");
+puts("return v2Array(NewArrayValue2(values...))");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "char" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("if str.tag != t2String {");
+puts("return v2Invalid(" + chr(34) + "char: expected key" + chr(34) + ")");
+puts("}");
+puts("pos := params.Get(Value2{tag: t2Int, i: 1})");
+puts("posVal := pos.IntValue()");
+puts("if posVal >= 0 && posVal < len(str.s) {");
+puts("return Value2{tag: t2String, s: string(str.s[posVal])}");
+puts("} else {");
+puts("return v2Null()");
+puts("}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "len" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("x := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2Int, i: int64(x.Length())}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "chr" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("asciiCode := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2String, s: string(rune(asciiCode.IntValue()))}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "ord" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("chr := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2Int, i: int64(chr.String()[0])}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "substr" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("start := params.Get(Value2{tag: t2Int, i: 1})");
+puts("len := params.Get(Value2{tag: t2Int, i: 2})");
+puts("return Value2{tag: t2String, s: str.ValueString()[start.IntValue() : start.IntValue()+len.IntValue()]}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "int" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("num, err := strconv.Atoi(v.ValueString())");
+puts("if err == nil {");
+puts("return Value2{tag: t2Int, i: int64(num)}");
+puts("} else {");
+puts("return v2Invalid(" + chr(34) + "int: " + chr(34) + " + err.Error())");
+puts("}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "string" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2String, s: v.ValueString()}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "random" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("secId, err := GenerateSecureID()");
+puts("if err != nil {");
+puts("return v2Invalid(" + chr(34) + "random: " + chr(34) + " + err.Error())");
+puts("}");
+puts("return Value2{tag: t2String, s: secId}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "typeof" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return v.Type()");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "isArray" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2Bool, b: v.Type().ValueString() == " + chr(34) + "array" + chr(34) + "}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "isMap" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2Bool, b: v.Type().ValueString() == " + chr(34) + "map" + chr(34) + "}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "isNumber" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2Bool, b: v.Type().ValueString() == " + chr(34) + "number" + chr(34) + "}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "isString" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2Bool, b: v.Type().ValueString() == " + chr(34) + "string" + chr(34) + "}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "assert" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("t := params.Get(Value2{tag: t2Int, i: 0})");
+puts("m := params.Get(Value2{tag: t2Int, i: 1})");
+puts("if !t.IsTruthy() {");
+puts("panic(" + chr(34) + "assertion failed: " + chr(34) + " + m.ValueString())");
+puts("return v2Invalid(" + chr(34) + "assert: " + chr(34) + " + m.ValueString())");
+puts("}");
+puts("return v2Null()");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "double" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("v := params.Get(Value2{tag: t2Int, i: 0})");
+puts("num, err := strconv.ParseFloat(v.ValueString(), 64)");
+puts("if err == nil {");
+puts("return Value2{tag: t2Double, d: num}");
+puts("} else {");
+puts("return v2Null()");
+puts("}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "echo" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("return params.Get(Value2{tag: t2Int, i: 0})");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "print" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("val := params.Get(Value2{tag: t2Int, i: 0})");
+puts("fmt.Print(val.String())");
+puts("return Value2{tag: t2Int, i: 0}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "delete" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("collection := params.Get(Value2{tag: t2Int, i: 0})");
+puts("keyOrIndex := params.Get(Value2{tag: t2Int, i: 1})");
+puts("if collection.tag == t2Array {");
+puts("if keyOrIndex.tag != t2Int {");
+puts("return v2Invalid(" + chr(34) + "delete: array index must be a number" + chr(34) + ")");
+puts("}");
+puts("idx := int(keyOrIndex.i)");
+puts("if idx < 0 || idx >= len(collection.arr.values) {");
+puts("return v2Invalid(" + chr(34) + "delete: array index out of bounds" + chr(34) + ")");
+puts("}");
+puts("removed := collection.arr.values[idx]");
+puts("collection.arr.values = append(collection.arr.values[:idx], collection.arr.values[idx+1:]...)");
+puts("return removed");
+puts("} else if collection.tag == t2Map {");
+puts("if idx, found := collection.m.findPair(keyOrIndex); found {");
+puts("removed := collection.m.pairs[idx].Value");
+puts("collection.m.pairs = append(collection.m.pairs[:idx], collection.m.pairs[idx+1:]...)");
+puts("if collection.m.keyIndex == nil {");
+puts("collection.m.keyIndex = make(map[string]int)");
+puts("} else {");
+puts("for k := range collection.m.keyIndex {");
+puts("delete(collection.m.keyIndex, k)");
+puts("}");
+puts("}");
+puts("for i, pair := range collection.m.pairs {");
+puts("collection.m.keyIndex[pair.Key.String()] = i");
+puts("}");
+puts("return removed");
+puts("}");
+puts("return v2Null()");
+puts("} else {");
+puts("return v2Invalid(" + chr(34) + "delete: first argument must be an array or map" + chr(34) + ")");
+puts("}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "startsWith" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("prefix := params.Get(Value2{tag: t2Int, i: 1})");
+puts("return Value2{tag: t2Bool, b: strings.HasPrefix(str.ValueString(), prefix.ValueString())}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "endsWith" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("suffix := params.Get(Value2{tag: t2Int, i: 1})");
+puts("return Value2{tag: t2Bool, b: strings.HasSuffix(str.ValueString(), suffix.ValueString())}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "trim" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("return Value2{tag: t2String, s: strings.TrimSpace(str.ValueString())}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "match" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("pattern := params.Get(Value2{tag: t2Int, i: 1})");
+puts("patternStr := strings.ReplaceAll(pattern.ValueString(), " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ", " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ")");
+puts("matched, err := regexp.MatchString(patternStr, str.ValueString())");
+puts("if err != nil {");
+puts("return v2Invalid(" + chr(34) + "match: invalid regex pattern: " + chr(34) + " + err.Error())");
+puts("}");
+puts("return Value2{tag: t2Bool, b: matched}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "findAll" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("pattern := params.Get(Value2{tag: t2Int, i: 1})");
+puts("patternStr := strings.ReplaceAll(pattern.ValueString(), " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ", " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ")");
+puts("re, exists := regexCache[patternStr]");
+puts("if !exists {");
+puts("var err error");
+puts("re, err = regexp.Compile(patternStr)");
+puts("if err != nil {");
+puts("return v2Invalid(" + chr(34) + "findAll: invalid regex pattern: " + chr(34) + " + err.Error())");
+puts("}");
+puts("regexCache[patternStr] = re");
+puts("}");
+puts("matches := re.FindAllString(str.ValueString(), -1)");
+puts("values := make([]Value2, len(matches))");
+puts("for i, match := range matches {");
+puts("values[i] = Value2{tag: t2String, s: match}");
+puts("}");
+puts("return v2Array(NewArrayValue2(values...))");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "replace" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("pattern := params.Get(Value2{tag: t2Int, i: 1})");
+puts("replacement := params.Get(Value2{tag: t2Int, i: 2})");
+puts("patternStr := strings.ReplaceAll(pattern.ValueString(), " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ", " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ")");
+puts("re, exists := regexCache[patternStr]");
+puts("if !exists {");
+puts("var err error");
+puts("re, err = regexp.Compile(patternStr)");
+puts("if err != nil {");
+puts("return v2Invalid(" + chr(34) + "replace: invalid regex pattern: " + chr(34) + " + err.Error())");
+puts("}");
+puts("regexCache[patternStr] = re");
+puts("}");
+puts("result := re.ReplaceAllString(str.ValueString(), replacement.ValueString())");
+puts("return Value2{tag: t2String, s: result}");
+puts("})))");
+puts("ctx2.Create(" + chr(34) + "split" + chr(34) + ", v2Func(NewFunctionCommand2(ctx2, func(ctx2 *Context2, params *ArrayValue2) Value2 {");
+puts("str := params.Get(Value2{tag: t2Int, i: 0})");
+puts("pattern := params.Get(Value2{tag: t2Int, i: 1})");
+puts("patternStr := strings.ReplaceAll(pattern.ValueString(), " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ", " + chr(34) + "" + chr(92) + "" + chr(92) + "" + chr(34) + ")");
+puts("re, exists := regexCache[patternStr]");
+puts("if !exists {");
+puts("var err error");
+puts("re, err = regexp.Compile(patternStr)");
+puts("if err != nil {");
+puts("return v2Invalid(" + chr(34) + "split: invalid regex pattern: " + chr(34) + " + err.Error())");
+puts("}");
+puts("regexCache[patternStr] = re");
+puts("}");
+puts("parts := re.Split(str.ValueString(), -1)");
+puts("values := make([]Value2, len(parts))");
+puts("for i, part := range parts {");
+puts("values[i] = Value2{tag: t2String, s: part}");
+puts("}");
+puts("return v2Array(NewArrayValue2(values...))");
+puts("})))");
+puts("}");
 puts("// --- Value2 tagged-union (Phase 1) ---");
 puts("const (");
 puts("t2Null uint8 = iota");
@@ -5366,9 +5665,9 @@ puts("b     bool");
 puts("i     int64");
 puts("d     float64");
 puts("s     string");
-puts("arr   *ArrayValue");
-puts("m     *MapValue");
-puts("cmd   Command");
+puts("arr   *ArrayValue2");
+puts("m     *MapValue2");
+puts("cmd   Command2");
 puts("inv   string");
 puts("}");
 puts("func (v Value2) IsTruthy() bool {");
@@ -5440,7 +5739,7 @@ puts("sb2.WriteString(other.String())");
 puts("return Value2{tag: t2String, s: sb2.String()}");
 puts("case t2Array:");
 puts("if other.tag == t2Array {");
-puts("result := &ArrayValue{values: make([]Value2, len(v.arr.values)+len(other.arr.values))}");
+puts("result := &ArrayValue2{values: make([]Value2, len(v.arr.values)+len(other.arr.values))}");
 puts("copy(result.values, v.arr.values)");
 puts("copy(result.values[len(v.arr.values):], other.arr.values)");
 puts("return Value2{tag: t2Array, arr: result}");
@@ -5616,7 +5915,7 @@ puts("func (v Value2) Values() Value2 {");
 puts("if v.tag == t2Map { return v.m.Values() }");
 puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "Values not supported" + chr(34) + "}");
 puts("}");
-puts("func (v Value2) Execute(ctx *Context, params *ArrayValue) Value2 {");
+puts("func (v Value2) Execute(ctx *Context2, params *ArrayValue2) Value2 {");
 puts("if v.tag == t2Func { return v.cmd.Execute(ctx, params) }");
 puts("return v");
 puts("}");
@@ -5643,9 +5942,9 @@ puts("func v2Bool(b bool) Value2 { return Value2{tag: t2Bool, b: b} }");
 puts("func v2Int(i int64) Value2 { return Value2{tag: t2Int, i: i} }");
 puts("func v2Double(d float64) Value2 { return Value2{tag: t2Double, d: d} }");
 puts("func v2String(s string) Value2 { return Value2{tag: t2String, s: s} }");
-puts("func v2Array(a *ArrayValue) Value2 { return Value2{tag: t2Array, arr: a} }");
+puts("func v2Array(a *ArrayValue2) Value2 { return Value2{tag: t2Array, arr: a} }");
 puts("func v2Map(m *MapValue2) Value2 { return Value2{tag: t2Map, m: m} }");
-puts("func v2Func(c Command) Value2 { return Value2{tag: t2Func, cmd: c} }");
+puts("func v2Func(c Command2) Value2 { return Value2{tag: t2Func, cmd: c} }");
 puts("func v2Invalid(reason string) Value2 { return Value2{tag: t2Invalid, inv: reason} }");
 puts("func Value2ToOld(v Value2) Value { return nil } // stub — unused during transition");
 puts("// --- ArrayValue2 (Value2-based array) ---");
@@ -5782,6 +6081,9 @@ puts("func (c *FunctionCommand2) String() string { return " + chr(34) + "functio
 puts("func (c *FunctionCommand2) IsTruthy() bool { return true }");
 puts("func (c *FunctionCommand2) IsInvalid() bool { return false }");
 puts("func NewFunctionCommand2(defCtx *Context2, fn func(*Context2, *ArrayValue2) Value2) Command2 {");
+puts("return &FunctionCommand2{definitionCtx: defCtx, executeFunc: fn}");
+puts("}");
+puts("func NewStaticFunctionCommand2(defCtx *Context2, fn func(*Context2, *ArrayValue2) Value2) Command2 {");
 puts("return &FunctionCommand2{definitionCtx: defCtx, executeFunc: fn}");
 puts("}");
 puts("// --- end Value2 helpers ---");
@@ -7083,13 +7385,17 @@ puts("}");
 puts("}");
 puts("ctx := NewContext(nil)");
 puts("registerLibraryFunctions(ctx)");
+puts("ctx2 := NewContext2(nil)");
+puts("registerLibraryFunctions2(ctx2)");
 puts("defer func() {");
 puts("if os.Getenv(" + chr(34) + "IJ_COUNTERS" + chr(34) + ") != " + chr(34) + chr(34) + " {");
 puts("fmt.Fprintf(os.Stderr, " + chr(34) + "[IJ counters] NewContext=%d Create=%d Get=%d Update=%d MapGet=%d MapPut=%d FuncExec=%d NewMap=%d NewArr=%d Promote=%d" + chr(92) + "n" + chr(34) + ", ijCountNewContext, ijCountCreate, ijCountGet, ijCountUpdate, ijCountMapGet, ijCountMapPut, ijCountFuncExec, ijCountNewMap, ijCountNewArr, ijCountCtxPromote)");
 puts("}");
 puts("}()");
-puts("var result Value = nil");
-puts("if result != nil {");
+puts("_ = ctx");
+puts("_ = ctx2");
+puts("var result Value2 = v2Null()");
+puts("if result.IsTruthy() {");
 puts("fmt.Println(" + chr(34) + "NO OP" + chr(34) + ")");
 puts("}");
 }
@@ -7628,7 +7934,7 @@ if (transpileGo) {
                 while (gi < len(libs)) {
                     let lname = libs[gi];
                     if (emitted[lname] == null) {
-                        puts("var " + mangle(lname) + " Value");
+                        puts("var " + mangle(lname) + " Value2");
                         emitted[lname] = true;
                     }
                     gi = gi + 1;
@@ -7640,7 +7946,7 @@ if (transpileGo) {
                 while (gj < len(roots)) {
                     let rname = roots[gj];
                     if (emitted[rname] == null) {
-                        puts("var " + mangle(rname) + " Value");
+                        puts("var " + mangle(rname) + " Value2");
                         emitted[rname] = true;
                     }
                     gj = gj + 1;
