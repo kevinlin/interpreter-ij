@@ -7560,11 +7560,98 @@ def makeInterpreter() {
     }
     interpreter["getAstJson"] = getAstJson;
 
+    def refreshToGoPointers(node) {
+        if (node == null) { return null; }
+        let t = node["type"];
+        if (t == "Program") {
+            // no-op; delegate to children
+        } else { if (t == "ExpressionStatement") { node["toGo"] = toGoJsonExpressionStatement; }
+        else { if (t == "BlockStatement") { node["toGo"] = blockStatementToGo; }
+        else { if (t == "ReturnStatement") { node["toGo"] = ReturnStatement_toGo; }
+        else { if (t == "VariableDeclaration") { node["toGo"] = variableDeclarationToGo; }
+        else { if (t == "FunctionDeclaration") { node["toGo"] = functionDeclarationToGo; }
+        else { if (t == "IfStatement") { node["toGo"] = ifStatementToGo; }
+        else { if (t == "WhileStatement") { /* local closure */ }
+        else { if (t == "IndexExpression") { /* local closure */ }
+        else { if (t == "IndexAssignment") { node["toGo"] = indexAssignmentStatement_toGo; }
+        else { if (t == "InfixExpression") { node["toGo"] = infixExpressionToGo; }
+        else { if (t == "PrefixExpression") { node["toGo"] = PrefixExpression_toGo; }
+        else { if (t == "CallExpression") { node["toGo"] = CallExpression_toGo; }
+        else { if (t == "NumberLiteral") { node["toGo"] = numberLiteralToGo; }
+        else { if (t == "StringLiteral") { node["toGo"] = stringLiteralToGo; }
+        else { if (t == "BooleanLiteral") { node["toGo"] = toGoBooleanLiteral; }
+        else { if (t == "NullLiteral") { node["toGo"] = nullLiteralToGo; }
+        else { if (t == "Identifier") { node["toGo"] = identifierToGo; }
+        else { if (t == "ArrayLiteral") { node["toGo"] = arrayLiteralToGo; }
+        else { if (t == "MapLiteral") { /* local closure */ }
+        else { if (t == "AssignmentStatement") { node["toGo"] = assignmentStatementToGo; }
+        }}}}}}}}}}}}}}}}}}}}
+
+        let stmts = node["statements"];
+        if (stmts != null) {
+            let si = 0;
+            while (si < len(stmts)) { refreshToGoPointers(stmts[si]); si = si + 1; }
+        }
+        let body = node["body"];
+        if (body != null) { refreshToGoPointers(body); }
+        let cond = node["condition"];
+        if (cond != null) { refreshToGoPointers(cond); }
+        let cons = node["consequence"];
+        if (cons != null) { refreshToGoPointers(cons); }
+        let alt = node["alternative"];
+        if (alt != null) { refreshToGoPointers(alt); }
+        let val = node["value"];
+        if (val != null) { refreshToGoPointers(val); }
+        let l = node["left"];
+        if (l != null) { refreshToGoPointers(l); }
+        let r = node["right"];
+        if (r != null) { refreshToGoPointers(r); }
+        let coll = node["collection"];
+        if (coll != null) { refreshToGoPointers(coll); }
+        let idx = node["index"];
+        if (idx != null) { refreshToGoPointers(idx); }
+        let elems = node["elements"];
+        if (elems != null) {
+            let ei = 0;
+            while (ei < len(elems)) { refreshToGoPointers(elems[ei]); ei = ei + 1; }
+        }
+        let callee = node["callee"];
+        if (callee != null) { refreshToGoPointers(callee); }
+        let args = node["arguments"];
+        if (args != null) {
+            let ai = 0;
+            while (ai < len(args)) { refreshToGoPointers(args[ai]); ai = ai + 1; }
+        }
+        let expr = node["expression"];
+        if (expr != null) { refreshToGoPointers(expr); }
+        let params = node["parameters"];
+        if (params != null) {
+            let pi = 0;
+            while (pi < len(params)) { refreshToGoPointers(params[pi]); pi = pi + 1; }
+        }
+        let init = node["initializer"];
+        if (init != null) { refreshToGoPointers(init); }
+        let pairs = node["pairs"];
+        if (pairs != null) {
+            let pi2 = 0;
+            while (pi2 < len(pairs)) {
+                let p = pairs[pi2];
+                if (p != null) {
+                    if (p["key"] != null) { refreshToGoPointers(p["key"]); }
+                    if (p["value"] != null) { refreshToGoPointers(p["value"]); }
+                }
+                pi2 = pi2 + 1;
+            }
+        }
+        return null;
+    }
+
     def toGo(self) {
         if (self["ast"] == null) {
             return null;
         }
         resolveScopes(self["ast"]);
+        refreshToGoPointers(self["ast"]);
         return self["ast"]["toGo"](self["ast"]);
     }
     interpreter["toGo"] = toGo;

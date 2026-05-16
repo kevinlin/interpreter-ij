@@ -44,17 +44,18 @@ Edits: `src/interpreter.s` runtime emit block (~5159-6402) + all `*ToGo` codegen
 - [x] Package-level var declarations use Value2 type
 
 **Verification:**
-- [x] verify.sh checks 1-4 pass
+- [x] verify.sh checks 1-4 pass (parse error in checks 1-2 was fixed)
+- [x] `refreshToGoPointers` added to `makeInterpreter` — refreshes pointer-based codegen hooks after self-transpile so evaluator emits current codegen functions
+- [x] Bool helpers in `goLibPrefix` updated to use `Value2` tag checks (source ~line 7244-7269)
+- [x] `mapLiteralToGo` and `arrayLiteralToGo` updated to wrap results in `Value2` (lines 4509, 73)
 
 ### Remaining
 
-1. **[ ] verify.sh check 5 — double self-transpile fixed-point still fails**
-   - Stage 1 builds successfully via the clean (pre-Value2) binary
-   - Stage 2 fails: evaluator code self-transpilation has old-type references
-     - Evaluator uses `ctx` (old `*Context`) where `Value2.Execute` expects `*Context2`
-     - Some evaluator variable declarations still reference old `Value` interface
-     - Evaluator's internal create-call-invoke pattern mixes old/new types
-   - Fix requires completing evaluator codegen switch throughout IJ evaluator logic
+1. **[ ] verify.sh check 5 — double self-transpile fixed-point**
+   - Legacy binary (built from commit `80f3358`) has old `goLibPrefix` that emits old types; even though `interpreter.s` source now emits Value2 codegen, the legacy binary's runtime emits old-type references in the raw `app.go` it produces.
+   - Bridge binary approach: `scripts/fix_app_go.py` post-processes the legacy binary's `app.go` to produce a self-consistent Value2 build.
+   - fix_app_go.py currently handles: `NewNullValue→v2Null`, `var Value→var Value2`, bool helpers. Map/array wrapping (`NewMapValue2AsValue`/`NewArrayValue2AsValue`) needs surgical per-line fixes (~12 remaining errors) due to context sensitivity.
+   - Next step: finalize bridge binary build by fixing the ~12 map/array errors in app.go.
 
 2. **[ ] Cleanup: after check 5 passes**
    - Remove old `Value` interface + per-type structs
@@ -65,9 +66,22 @@ Edits: `src/interpreter.s` runtime emit block (~5159-6402) + all `*ToGo` codegen
 
 Self-bootstrap constraint forces parallel type hierarchies during transition. Clean bootstrapped binary (built from pre-Value2 source) used to break chicken-and-egg: Value2 types added to `goLibPrefix`, codegen switched to emit Value2 code. The old binary emits old-style Go referencing old types; new binary emits Value2-style Go. Both coexist in emitted runtime until old codegen path fully replaced.
 
+### Bridge binary approach
+
+1. The legacy (pre-Value2) native binary transpiles the updated `interpreter.s` to `app.go`.
+2. `scripts/fix_app_go.py` post-processes `app.go` to fix old-type references emitted by the legacy binary's runtime:
+   - `result=NewNullValue()` → `result=v2Null()`
+   - `var ij_XXX Value =` → `var ij_XXX Value2 =`
+   - 6 old bool helpers (`EqualsBool` etc.) → Value2 tag-check versions
+   - `NewMapValue2(` / `NewArrayValue2(` → wrapped with `NewMapValue2AsValue(` / `NewArrayValue2AsValue(` (in progress — ~12 remaining context-sensitive sites)
+3. The fixed `app.go` compiles via `go build` to a bridge binary.
+4. The bridge binary transpiles `interpreter.s` again — this time emitting fully Value2-clean code with no old-type references, producing the final binary.
+
 ### Known state
 
-- verify.sh check 5 failing (evaluator codegen has old-type references in self-transpile path)
+- verify.sh checks 1-4 pass
+- verify.sh check 5 failing — bridge binary incomplete (~12 map/array wrapping errors in app.go)
+- After bridge binary works, cleanup pass renames `*2` types and re-baselines check 5
 
 ## Phase 2 — Typed AST Struct Nodes ⬜
 
