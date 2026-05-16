@@ -27,7 +27,7 @@ echo | ./interpreter.sh src/sample.s
 echo hi | ./selfhosted_interpreter.sh src/sample.s
 
 # Dump AST as JSON
-./src/native_ast.sh src/sample.s     # uses pre-built binary
+./native_ast.sh src/sample.s     # uses pre-built binary
 ./ast.sh src/sample.s            # uses interpreter.s
 
 # Test suite (regression suite written in IJ)
@@ -63,8 +63,8 @@ Compile IJ to a native binary:
 MCP server (LLM-callable IJ eval over stdio JSON-RPC):
 
 ```bash
-./src/mcp.sh         # interpreted (rebuilds mcp_eval.s and runs it)
-./src/native_mcp.sh  # pre-built native binary
+./mcp.sh            # interpreted (rebuilds mcp_eval.s and runs it)
+./native_mcp.sh  # pre-built native binary
 ```
 
 ## Big-picture architecture
@@ -88,7 +88,7 @@ IJ source → `interpreter.s` → (lex → parse → AST as nested maps) → eit
 
 ### MCP server build
 
-`src/mcp.sh` strips the bootstrap suffix from `interpreter.s` via `until.rb "interpreter is ready"` to make `interpreter_base.s`, then concatenates with `eval.s` + `mcp.s` into `mcp_eval.s` and runs it. The native MCP binary is built by transpiling `mcp_eval.s` (see `build.sh`). `eval.s` and `mcp.s` override `gets`/`puts`/`StdIOLibraryFunctionsInitializer` so the inner-interpreter can be fed scripts and have its output captured per JSON-RPC request — i.e. MCP is a second consumer of the same transpiler and is sensitive to the IJ "override pattern" (`let oldX = X; def X(...) { ... }`).
+`mcp.sh` strips the bootstrap suffix from `interpreter.s` via `until.rb "interpreter is ready"` to make `interpreter_base.s`, then concatenates with `eval.s` + `mcp.s` into `mcp_eval.s` and runs it. The native MCP binary is built by transpiling `mcp_eval.s` (see `build.sh`). `eval.s` and `mcp.s` override `gets`/`puts`/`StdIOLibraryFunctionsInitializer` so the inner-interpreter can be fed scripts and have its output captured per JSON-RPC request — i.e. MCP is a second consumer of the same transpiler and is sensitive to the IJ "override pattern" (`let oldX = X; def X(...) { ... }`).
 
 ### Performance machinery in the transpiler
 

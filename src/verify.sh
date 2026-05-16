@@ -18,8 +18,8 @@ if [[ "${1:-}" == "--capture" ]]; then
     mkdir -p "$GOLDEN"
     echo | ./interpreter.sh src/test.s > "$GOLDEN/test.out" 2>&1
     echo hi | native_interpreter.sh src/sample.s > "$GOLDEN/sample.out" 2>&1
-    echo "$MCP_INPUT" | src/mcp.sh 2>/dev/null > "$GOLDEN/mcp-interp.out"
-    echo "$MCP_INPUT" | src/native_mcp.sh 2>/dev/null > "$GOLDEN/mcp-native.out"
+    echo "$MCP_INPUT" | mcp.sh 2>/dev/null > "$GOLDEN/mcp-interp.out"
+    echo "$MCP_INPUT" | native_mcp.sh 2>/dev/null > "$GOLDEN/mcp-native.out"
     echo "captured goldens:"
     wc -l "$GOLDEN"/*.out
     exit 0
@@ -65,7 +65,7 @@ rm -f "$tmp"
 # 4. MCP native vs golden (both interpreted and native should still match).
 note "4/5 MCP native"
 tmp=$(mktemp)
-echo "$MCP_INPUT" | src/native_mcp.sh 2>/dev/null > "$tmp"
+echo "$MCP_INPUT" | native_mcp.sh 2>/dev/null > "$tmp"
 if ! diff -q "$GOLDEN/mcp-native.out" "$tmp" >/dev/null; then bad "native MCP diverges from golden"; diff "$GOLDEN/mcp-native.out" "$tmp" | head -10
 else ok "native MCP matches golden"; fi
 rm -f "$tmp"
