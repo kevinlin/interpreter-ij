@@ -17,8 +17,8 @@ Repo layout:
 
 ```bash
 # Run an IJ script with the native interpreter (fastest)
-echo | ./src/native_interpreter.sh src/sample.s
-echo "puts(22/7.0)" | ./src/native_interpreter.sh           # stdin program
+echo | ./native_interpreter.sh src/sample.s
+echo "puts(22/7.0)" | ./native_interpreter.sh           # stdin program
 
 # Run via the IJ-implemented interpreter (native runs interpreter.s, which runs your script)
 echo | ./interpreter.sh src/sample.s
@@ -32,7 +32,7 @@ echo hi | ./selfhosted_interpreter.sh src/sample.s
 
 # Test suite (regression suite written in IJ)
 ./test.sh
-# or:  echo | ./src/native_interpreter.sh src/test.s
+# or:  echo | ./native_interpreter.sh src/test.s
 
 # 5-check regression harness — run after any change to interpreter.s
 ./src/verify.sh                # compares against /tmp/ij-golden

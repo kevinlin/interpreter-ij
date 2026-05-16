@@ -3,7 +3,6 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Detect OS
 OS="$(uname -s)"
@@ -24,7 +23,7 @@ case "$ARCH" in
 esac
 
 # Construct binary name
-BINARY="$PROJECT_ROOT/interpreter_${OS_NAME}_${ARCH_NAME}"
+BINARY="$SCRIPT_DIR/interpreter_${OS_NAME}_${ARCH_NAME}"
 
 # Check if the binary exists
 if [[ ! -x "$BINARY" ]]; then

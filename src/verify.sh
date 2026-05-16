@@ -17,7 +17,7 @@ MCP_INPUT='{"method":"initialize","params":{"protocolVersion":"2024-11-05","capa
 if [[ "${1:-}" == "--capture" ]]; then
     mkdir -p "$GOLDEN"
     echo | ./interpreter.sh src/test.s > "$GOLDEN/test.out" 2>&1
-    echo hi | src/native_interpreter.sh src/sample.s > "$GOLDEN/sample.out" 2>&1
+    echo hi | native_interpreter.sh src/sample.s > "$GOLDEN/sample.out" 2>&1
     echo "$MCP_INPUT" | src/mcp.sh 2>/dev/null > "$GOLDEN/mcp-interp.out"
     echo "$MCP_INPUT" | src/native_mcp.sh 2>/dev/null > "$GOLDEN/mcp-native.out"
     echo "captured goldens:"
