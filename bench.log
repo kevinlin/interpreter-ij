@@ -1,0 +1,47 @@
+=== 2026-05-16T05:07:16Z label=run-baseline ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m10.450s
+user	3m4.691s
+sys	0m2.038s
+-- interpreter.sh test.s --
+
+real	0m0.741s
+user	0m1.544s
+sys	0m0.168s
+-- native_interpreter.sh src/test.s --
+
+real	0m0.029s
+user	0m0.008s
+sys	0m0.017s
+
+=== 2026-05-16T05:59:08Z label=phase0-baseline ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m10.341s
+user	3m3.620s
+sys	0m1.840s
+-- interpreter.sh test.s --
+
+real	0m0.706s
+user	0m1.504s
+sys	0m0.148s
+-- native_interpreter.sh src/test.s --
+./bench.sh: line 19: native_interpreter.sh: command not found
+=== 2026-05-16T06:00:47Z label=phase0-baseline ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m11.153s
+user	3m3.629s
+sys	0m1.837s
+-- interpreter.sh test.s --
+
+real	0m0.748s
+user	0m1.478s
+sys	0m0.166s
+-- native_interpreter.sh src/test.s --
+
+real	0m0.032s
+user	0m0.007s
+sys	0m0.012s
+
