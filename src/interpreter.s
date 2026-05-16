@@ -70,7 +70,7 @@ def arrayLiteralToJson(self) {
 def arrayLiteralToGo(self) {
     // Go: NewArrayValue(StringValue{val: "x-"})
     
-    print('NewArrayValue(');
+    print('NewArrayValue2(');
 
     let elems = self["elements"];
     let n = len(elems);
@@ -1027,7 +1027,7 @@ def nullLiteralToJson(self) {
 }
 
 def nullLiteralToGo(self) {
-    print('NullVal');
+    print('v2Null()');
 }
 
 
@@ -2013,19 +2013,16 @@ def numberLiteralToJson(node) {
 }
 
 def numberLiteralToGo(self) {
-    // GO: IntValue{val: 3} // FIXME Double?
-    
     let str = string(self["value"]);
     let i = 0;
     while (i < len(str)) {
         if (char(str, i) == ".") {
-            print('DoubleValue{val: ' +str + '}');
-            return;        
+            print('Value2{tag: t2Double, d: ' + str + '}');
+            return;
         }
         i = i + 1;
     }
-
-    print('IntValue{val: ' + str + '}');
+    print('Value2{tag: t2Int, i: ' + str + '}');
 }
 
 
@@ -2074,9 +2071,7 @@ def stringLiteralToJson(thisNode) {
 }
 
 def stringLiteralToGo(self) {
-    // GO: StringValue{val: "x"} 
-    
-    print('StringValue{val: "' + escapeGoStringLiteral(self["value"]) + '"}');
+    print('Value2{tag: t2String, s: "' + escapeGoStringLiteral(self["value"]) + '"}');
 }
 
 def escapeGoStringLiteral(s) {
@@ -2139,10 +2134,10 @@ def toJsonBooleanLiteral(self) {
 
 def toGoBooleanLiteral(self) {
     if (self["value"]) {
-        print('TrueValue()');
+        print('v2Bool(true)');
     }
     else {
-        print('FalseValue()');
+        print('v2Bool(false)');
     }
 }
 
@@ -3322,7 +3317,7 @@ def CallExpression_toGo(self) {
     }
 
     callee["toGo"](callee);
-    print('.Execute(ctx, NewArrayValue('); 
+    print('.Execute(ctx, NewArrayValue2('); 
 
     let i = 0;
     while (i < argsLen) {
@@ -3967,7 +3962,7 @@ def PrefixExpression_toGo(self) {
     let op = self["operator"];
 
     if (op == "-") {
-        print('IntValue{val: -1}.Multiply(');
+        print('Value2{tag: t2Int, i: -1}.Multiply(');
 
         if (self["right"]["toGo"] != null) {
             self["right"]["toGo"](self["right"])
@@ -4511,7 +4506,7 @@ def makeMapLiteral(pairs, position) {
   def toGo(self) {
     // Go: bar := NewMapValue(KeyValuePair{Key: IntValue{val: 66}, Value: IntValue{val: 999}})
     
-    print('NewMapValue(');
+    print('NewMapValue2(');
 
     let pairsArr = node["pairs"];
     let i = 0;
@@ -4783,7 +4778,7 @@ def variableDeclarationToGo(self) {
                 init["toGo"](init);
             }
         } else {
-            print('NullVal');
+            print('v2Null()');
         }
         puts('');
         puts('_ = ' + self["resolvedName"]);
@@ -5352,6 +5347,445 @@ puts("}");
 puts("func NewStaticFunctionCommand(definitionCtx *Context, fn func(*Context, *ArrayValue) Value) Command {");
 puts("return &FunctionCommand{definitionCtx: definitionCtx, executeFunc: fn, skipCtx: true}");
 puts("}");
+puts("// --- Value2 tagged-union (Phase 1) ---");
+puts("const (");
+puts("t2Null uint8 = iota");
+puts("t2Int");
+puts("t2Double");
+puts("t2String");
+puts("t2Bool");
+puts("t2Array");
+puts("t2Map");
+puts("t2Func");
+puts("t2Named");
+puts("t2Invalid");
+puts(")");
+puts("type Value2 struct {");
+puts("tag   uint8");
+puts("b     bool");
+puts("i     int64");
+puts("d     float64");
+puts("s     string");
+puts("arr   *ArrayValue");
+puts("m     *MapValue");
+puts("cmd   Command");
+puts("inv   string");
+puts("}");
+puts("func (v Value2) IsTruthy() bool {");
+puts("switch v.tag {");
+puts("case t2Null: return false");
+puts("case t2Int: return v.i != 0");
+puts("case t2Double: return v.d != 0");
+puts("case t2String: return len(v.s) > 0");
+puts("case t2Bool: return v.b");
+puts("case t2Array: return v.arr != nil && v.arr.Length() > 0");
+puts("case t2Map: return v.m != nil && v.m.Length() > 0");
+puts("case t2Func: return true");
+puts("case t2Invalid: return false");
+puts("}");
+puts("return false");
+puts("}");
+puts("func (v Value2) IsInvalid() bool { return v.tag == t2Invalid }");
+puts("func (v Value2) Length() int {");
+puts("switch v.tag {");
+puts("case t2String: return len(v.s)");
+puts("case t2Array: return v.arr.Length()");
+puts("case t2Map: return v.m.Length()");
+puts("}");
+puts("return 0");
+puts("}");
+puts("func (v Value2) IntValue() int {");
+puts("switch v.tag {");
+puts("case t2Int: return int(v.i)");
+puts("case t2Double: return int(v.d)");
+puts("case t2Bool: if v.b { return 1 }; return 0");
+puts("}");
+puts("return 0");
+puts("}");
+puts("func (v Value2) String() string {");
+puts("switch v.tag {");
+puts("case t2Null: return " + chr(34) + "null" + chr(34) + "");
+puts("case t2Int: return strconv.FormatInt(v.i, 10)");
+puts("case t2Double: return strconv.FormatFloat(v.d, 'f', -1, 64)");
+puts("case t2String: return v.s");
+puts("case t2Bool: if v.b { return " + chr(34) + "true" + chr(34) + " }; return " + chr(34) + "false" + chr(34) + "");
+puts("case t2Array: return v.arr.String()");
+puts("case t2Map: return v.m.String()");
+puts("case t2Func: return " + chr(34) + "function" + chr(34) + "");
+puts("case t2Invalid: return " + chr(34) + "invalid: " + chr(34) + " + v.inv");
+puts("}");
+puts("return " + chr(34) + chr(34) + "");
+puts("}");
+puts("func (v Value2) ValueString() string { return v.String() }");
+puts("func (v Value2) Add(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return other }");
+puts("switch v.tag {");
+puts("case t2Int:");
+puts("switch other.tag {");
+puts("case t2Int: return Value2{tag: t2Int, i: v.i + other.i}");
+puts("case t2Double: return Value2{tag: t2Double, d: float64(v.i) + other.d}");
+puts("case t2String: return Value2{tag: t2String, s: strconv.FormatInt(v.i, 10) + other.s}");
+puts("}");
+puts("case t2Double:");
+puts("switch other.tag {");
+puts("case t2Int: return Value2{tag: t2Double, d: v.d + float64(other.i)}");
+puts("case t2Double: return Value2{tag: t2Double, d: v.d + other.d}");
+puts("case t2String: return Value2{tag: t2String, s: strconv.FormatFloat(v.d, 'f', -1, 64) + other.s}");
+puts("}");
+puts("case t2String:");
+puts("var sb2 strings.Builder");
+puts("sb2.Grow(len(v.s) + len(other.String()))");
+puts("sb2.WriteString(v.s)");
+puts("sb2.WriteString(other.String())");
+puts("return Value2{tag: t2String, s: sb2.String()}");
+puts("case t2Array:");
+puts("if other.tag == t2Array {");
+puts("result := &ArrayValue{values: make([]Value2, len(v.arr.values)+len(other.arr.values))}");
+puts("copy(result.values, v.arr.values)");
+puts("copy(result.values[len(v.arr.values):], other.arr.values)");
+puts("return Value2{tag: t2Array, arr: result}");
+puts("}");
+puts("case t2Map:");
+puts("if other.tag == t2Map {");
+puts("result := &MapValue2{pairs: make([]KeyValuePair2, len(v.m.pairs)), keyIndex: make(map[string]int)}");
+puts("copy(result.pairs, v.m.pairs)");
+puts("for i, pair := range result.pairs { result.keyIndex[pair.Key.String()] = i }");
+puts("for _, pair := range other.m.pairs {");
+puts("if idx, found := result.keyIndex[pair.Key.String()]; found { result.pairs[idx].Value = pair.Value } else {");
+puts("newIdx := len(result.pairs); result.pairs = append(result.pairs, KeyValuePair2{Key: pair.Key, Value: pair.Value})");
+puts("result.keyIndex[pair.Key.String()] = newIdx");
+puts("}");
+puts("}");
+puts("return Value2{tag: t2Map, m: result}");
+puts("}");
+puts("}");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "type mismatch in Add" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Subtract(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return other }");
+puts("switch v.tag {");
+puts("case t2Int:");
+puts("switch other.tag {");
+puts("case t2Int: return Value2{tag: t2Int, i: v.i - other.i}");
+puts("case t2Double: return Value2{tag: t2Double, d: float64(v.i) - other.d}");
+puts("}");
+puts("case t2Double:");
+puts("switch other.tag {");
+puts("case t2Int: return Value2{tag: t2Double, d: v.d - float64(other.i)}");
+puts("case t2Double: return Value2{tag: t2Double, d: v.d - other.d}");
+puts("}");
+puts("}");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "type mismatch in Subtract" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Multiply(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return other }");
+puts("switch v.tag {");
+puts("case t2Int:");
+puts("switch other.tag {");
+puts("case t2Int: return Value2{tag: t2Int, i: v.i * other.i}");
+puts("case t2Double: return Value2{tag: t2Double, d: float64(v.i) * other.d}");
+puts("}");
+puts("case t2Double:");
+puts("switch other.tag {");
+puts("case t2Int: return Value2{tag: t2Double, d: v.d * float64(other.i)}");
+puts("case t2Double: return Value2{tag: t2Double, d: v.d * other.d}");
+puts("}");
+puts("}");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "type mismatch in Multiply" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Divide(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return other }");
+puts("switch v.tag {");
+puts("case t2Int:");
+puts("switch other.tag {");
+puts("case t2Int: if other.i == 0 { return Value2{tag: t2Invalid, inv: " + chr(34) + "division by zero" + chr(34) + "} }; return Value2{tag: t2Int, i: v.i / other.i}");
+puts("case t2Double: if other.d == 0 { return Value2{tag: t2Invalid, inv: " + chr(34) + "division by zero" + chr(34) + "} }; return Value2{tag: t2Double, d: float64(v.i) / other.d}");
+puts("}");
+puts("case t2Double:");
+puts("switch other.tag {");
+puts("case t2Int: if other.i == 0 { return Value2{tag: t2Invalid, inv: " + chr(34) + "division by zero" + chr(34) + "} }; return Value2{tag: t2Double, d: v.d / float64(other.i)}");
+puts("case t2Double: if other.d == 0 { return Value2{tag: t2Invalid, inv: " + chr(34) + "division by zero" + chr(34) + "} }; return Value2{tag: t2Double, d: v.d / other.d}");
+puts("}");
+puts("}");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "type mismatch in Divide" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Modulo(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return other }");
+puts("switch v.tag {");
+puts("case t2Int:");
+puts("switch other.tag {");
+puts("case t2Int: if other.i == 0 { return Value2{tag: t2Invalid, inv: " + chr(34) + "modulo by zero" + chr(34) + "} }; return Value2{tag: t2Int, i: v.i % other.i}");
+puts("case t2Double: if other.d == 0 { return Value2{tag: t2Invalid, inv: " + chr(34) + "modulo by zero" + chr(34) + "} }; return Value2{tag: t2Invalid, inv: " + chr(34) + "modulo not defined for floating point" + chr(34) + "}");
+puts("}");
+puts("}");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "type mismatch in Modulo" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Equals(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return Value2{tag: t2Bool, b: false} }");
+puts("if v.tag != other.tag { return Value2{tag: t2Bool, b: false} }");
+puts("switch v.tag {");
+puts("case t2Null: return Value2{tag: t2Bool, b: true}");
+puts("case t2Int: return Value2{tag: t2Bool, b: v.i == other.i}");
+puts("case t2Double: return Value2{tag: t2Bool, b: v.d == other.d}");
+puts("case t2String: return Value2{tag: t2Bool, b: v.s == other.s}");
+puts("case t2Bool: return Value2{tag: t2Bool, b: v.b == other.b}");
+puts("case t2Func: return Value2{tag: t2Bool, b: v.cmd == other.cmd}");
+puts("}");
+puts("return Value2{tag: t2Bool, b: false}");
+puts("}");
+puts("func (v Value2) LessThan(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return Value2{tag: t2Bool, b: false} }");
+puts("switch v.tag {");
+puts("case t2Int: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.i < other.i} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: float64(v.i) < other.d} }");
+puts("case t2Double: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.d < float64(other.i)} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: v.d < other.d} }");
+puts("}");
+puts("return Value2{tag: t2Bool, b: false}");
+puts("}");
+puts("func (v Value2) LessThanEqual(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return Value2{tag: t2Bool, b: false} }");
+puts("switch v.tag {");
+puts("case t2Null: return Value2{tag: t2Bool, b: other.tag == t2Null}");
+puts("case t2Int: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.i <= other.i} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: float64(v.i) <= other.d} }");
+puts("case t2Double: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.d <= float64(other.i)} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: v.d <= other.d} }");
+puts("}");
+puts("return Value2{tag: t2Bool, b: false}");
+puts("}");
+puts("func (v Value2) BiggerThan(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return Value2{tag: t2Bool, b: false} }");
+puts("switch v.tag {");
+puts("case t2Int: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.i > other.i} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: float64(v.i) > other.d} }");
+puts("case t2Double: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.d > float64(other.i)} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: v.d > other.d} }");
+puts("}");
+puts("return Value2{tag: t2Bool, b: false}");
+puts("}");
+puts("func (v Value2) BiggerThanEqual(other Value2) Value2 {");
+puts("if other.tag == t2Invalid { return Value2{tag: t2Bool, b: false} }");
+puts("switch v.tag {");
+puts("case t2Null: return Value2{tag: t2Bool, b: other.tag == t2Null}");
+puts("case t2Int: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.i >= other.i} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: float64(v.i) >= other.d} }");
+puts("case t2Double: if other.tag == t2Int { return Value2{tag: t2Bool, b: v.d >= float64(other.i)} }; if other.tag == t2Double { return Value2{tag: t2Bool, b: v.d >= other.d} }");
+puts("}");
+puts("return Value2{tag: t2Bool, b: false}");
+puts("}");
+puts("func (v Value2) And(other Value2) Value2 {");
+puts("if v.IsTruthy() { return other }");
+puts("return v");
+puts("}");
+puts("func (v Value2) Or(other Value2) Value2 {");
+puts("if v.IsTruthy() { return v }");
+puts("return other");
+puts("}");
+puts("func (v Value2) Not() Value2 {");
+puts("return Value2{tag: t2Bool, b: !v.IsTruthy()}");
+puts("}");
+puts("func (v Value2) Get(index Value2) Value2 {");
+puts("switch v.tag {");
+puts("case t2String:");
+puts("if index.tag != t2Int { return Value2{tag: t2Invalid, inv: " + chr(34) + "string index must be number" + chr(34) + "} }");
+puts("idx := int(index.i)");
+puts("if idx >= 0 && idx < len(v.s) { return Value2{tag: t2String, s: string(v.s[idx])} }");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "string index out of bounds" + chr(34) + "}");
+puts("case t2Array:");
+puts("if index.tag != t2Int { return Value2{tag: t2Invalid, inv: " + chr(34) + "array index must be number" + chr(34) + "} }");
+puts("idx := int(index.i)");
+puts("if idx >= 0 && idx < len(v.arr.values) { return v.arr.values[idx] }");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "array index out of bounds" + chr(34) + "}");
+puts("case t2Map:");
+puts("return v.m.Get(index)");
+puts("}");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "Get not supported for type" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Put(index Value2, value Value2) Value2 {");
+puts("switch v.tag {");
+puts("case t2Array:");
+puts("if index.tag != t2Int { return Value2{tag: t2Invalid, inv: " + chr(34) + "array index must be number for Put" + chr(34) + "} }");
+puts("idx := int(index.i)");
+puts("if idx < 0 || idx >= len(v.arr.values) { return Value2{tag: t2Invalid, inv: " + chr(34) + "array index out of bounds" + chr(34) + "} }");
+puts("v.arr.values[idx] = value");
+puts("return value");
+puts("case t2Map:");
+puts("return v.m.Put(index, value)");
+puts("}");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "Put not supported for type" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Keys() Value2 {");
+puts("if v.tag == t2Map { return v.m.Keys() }");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "Keys not supported" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Values() Value2 {");
+puts("if v.tag == t2Map { return v.m.Values() }");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "Values not supported" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Execute(ctx *Context, params *ArrayValue) Value2 {");
+puts("if v.tag == t2Func { return v.cmd.Execute(ctx, params) }");
+puts("return v");
+puts("}");
+puts("func (v Value2) Type() Value2 {");
+puts("switch v.tag {");
+puts("case t2Null: return Value2{tag: t2String, s: " + chr(34) + "null" + chr(34) + "}");
+puts("case t2Int: return Value2{tag: t2String, s: " + chr(34) + "number" + chr(34) + "}");
+puts("case t2Double: return Value2{tag: t2String, s: " + chr(34) + "number" + chr(34) + "}");
+puts("case t2String: return Value2{tag: t2String, s: " + chr(34) + "string" + chr(34) + "}");
+puts("case t2Bool: return Value2{tag: t2String, s: " + chr(34) + "boolean" + chr(34) + "}");
+puts("case t2Array: return Value2{tag: t2String, s: " + chr(34) + "array" + chr(34) + "}");
+puts("case t2Map: return Value2{tag: t2String, s: " + chr(34) + "map" + chr(34) + "}");
+puts("case t2Func: return Value2{tag: t2String, s: " + chr(34) + "function" + chr(34) + "}");
+puts("case t2Invalid: return Value2{tag: t2String, s: " + chr(34) + "invalid" + chr(34) + "}");
+puts("}");
+puts("return Value2{tag: t2String, s: " + chr(34) + "unknown" + chr(34) + "}");
+puts("}");
+puts("func (v Value2) Append(value Value2) Value2 {");
+puts("if v.tag == t2Array { v.arr.values = append(v.arr.values, value); return value }");
+puts("return Value2{tag: t2Invalid, inv: " + chr(34) + "Append only supported for arrays" + chr(34) + "}");
+puts("}");
+puts("func v2Null() Value2 { return Value2{tag: t2Null} }");
+puts("func v2Bool(b bool) Value2 { return Value2{tag: t2Bool, b: b} }");
+puts("func v2Int(i int64) Value2 { return Value2{tag: t2Int, i: i} }");
+puts("func v2Double(d float64) Value2 { return Value2{tag: t2Double, d: d} }");
+puts("func v2String(s string) Value2 { return Value2{tag: t2String, s: s} }");
+puts("func v2Array(a *ArrayValue) Value2 { return Value2{tag: t2Array, arr: a} }");
+puts("func v2Map(m *MapValue2) Value2 { return Value2{tag: t2Map, m: m} }");
+puts("func v2Func(c Command) Value2 { return Value2{tag: t2Func, cmd: c} }");
+puts("func v2Invalid(reason string) Value2 { return Value2{tag: t2Invalid, inv: reason} }");
+puts("func Value2ToOld(v Value2) Value { return nil } // stub — unused during transition");
+puts("// --- ArrayValue2 (Value2-based array) ---");
+puts("type ArrayValue2 struct {");
+puts("values []Value2");
+puts("}");
+puts("func NewArrayValue2(elements ...Value2) *ArrayValue2 {");
+puts("return &ArrayValue2{values: elements}");
+puts("}");
+puts("func (a *ArrayValue2) Get(index Value2) Value2 {");
+puts("if index.tag != t2Int { return v2Invalid(" + chr(34) + "ArrayValue2 requires int index" + chr(34) + ") }");
+puts("idx := int(index.i)");
+puts("if idx >= 0 && idx < len(a.values) { return a.values[idx] }");
+puts("return v2Invalid(" + chr(34) + "index out of bounds" + chr(34) + ")");
+puts("}");
+puts("func (a *ArrayValue2) Put(index Value2, value Value2) Value2 {");
+puts("if index.tag != t2Int { return v2Invalid(" + chr(34) + "ArrayValue2 requires int index" + chr(34) + ") }");
+puts("idx := int(index.i)");
+puts("if idx < 0 || idx >= len(a.values) { return v2Invalid(" + chr(34) + "index out of bounds" + chr(34) + ") }");
+puts("a.values[idx] = value");
+puts("return value");
+puts("}");
+puts("func (a *ArrayValue2) Append(value Value2) Value2 {");
+puts("a.values = append(a.values, value)");
+puts("return value");
+puts("}");
+puts("func (a *ArrayValue2) Length() int { return len(a.values) }");
+puts("func (a *ArrayValue2) String() string {");
+puts("if len(a.values) == 0 { return " + chr(34) + "[]" + chr(34) + " }");
+puts("var sb2 strings.Builder");
+puts("sb2.WriteString(" + chr(34) + "[" + chr(34) + ")");
+puts("for i, v := range a.values { if i > 0 { sb2.WriteByte(',') }; sb2.WriteString(v.String()) }");
+puts("sb2.WriteString(" + chr(34) + "]" + chr(34) + ")");
+puts("return sb2.String()");
+puts("}");
+puts("// --- MapValue2 (Value2-based map) ---");
+puts("type KeyValuePair2 struct {");
+puts("Key   Value2");
+puts("Value Value2");
+puts("}");
+puts("type MapValue2 struct {");
+puts("pairs    []KeyValuePair2");
+puts("keyIndex map[string]int");
+puts("}");
+puts("func NewMapValue2(pairs ...KeyValuePair2) *MapValue2 {");
+puts("m := &MapValue2{pairs: pairs, keyIndex: make(map[string]int)}");
+puts("for i, pair := range pairs { m.keyIndex[pair.Key.String()] = i }");
+puts("return m");
+puts("}");
+puts("func NewEmptyMapValue2() *MapValue2 {");
+puts("return &MapValue2{keyIndex: make(map[string]int)}");
+puts("}");
+puts("func (m *MapValue2) findPair(key Value2) (int, bool) {");
+puts("idx, found := m.keyIndex[key.String()]");
+puts("return idx, found");
+puts("}");
+puts("func (m *MapValue2) Get(index Value2) Value2 {");
+puts("if idx, found := m.findPair(index); found { return m.pairs[idx].Value }");
+puts("return v2Null()");
+puts("}");
+puts("func (m *MapValue2) Put(index Value2, value Value2) Value2 {");
+puts("keyStr := index.String()");
+puts("if idx, found := m.keyIndex[keyStr]; found { m.pairs[idx].Value = value } else {");
+puts("newIdx := len(m.pairs); m.pairs = append(m.pairs, KeyValuePair2{Key: index, Value: value})");
+puts("m.keyIndex[keyStr] = newIdx");
+puts("}");
+puts("return value");
+puts("}");
+puts("func (m *MapValue2) Length() int { return len(m.pairs) }");
+puts("func (m *MapValue2) Keys() Value2 {");
+puts("keys := make([]Value2, len(m.pairs))");
+puts("for i, pair := range m.pairs { keys[i] = pair.Key }");
+puts("return v2Array(NewArrayValue2(keys...))");
+puts("}");
+puts("func (m *MapValue2) Values() Value2 {");
+puts("values := make([]Value2, len(m.pairs))");
+puts("for i, pair := range m.pairs { values[i] = pair.Value }");
+puts("return v2Array(NewArrayValue2(values...))");
+puts("}");
+puts("func (m *MapValue2) String() string {");
+puts("if len(m.pairs) == 0 { return " + chr(34) + "{}" + chr(34) + " }");
+puts("var sb2 strings.Builder");
+puts("sb2.WriteString(" + chr(34) + "{" + chr(34) + ")");
+puts("for i, pair := range m.pairs { if i > 0 { sb2.WriteByte(',') }; sb2.WriteString(pair.Key.String()); sb2.WriteByte(':'); sb2.WriteString(pair.Value.String()) }");
+puts("sb2.WriteString(" + chr(34) + "}" + chr(34) + ")");
+puts("return sb2.String()");
+puts("}");
+puts("// --- Context2 (Value2-based context) ---");
+puts("type Context2 struct {");
+puts("parent    *Context2");
+puts("variables map[string]Value2");
+puts("}");
+puts("func NewContext2(parent *Context2) *Context2 {");
+puts("return &Context2{parent: parent}");
+puts("}");
+puts("func (c *Context2) Get(name string) Value2 {");
+puts("for ctx := c; ctx != nil; ctx = ctx.parent {");
+puts("if v, ok := ctx.variables[name]; ok { return v }");
+puts("}");
+puts("return v2Invalid(" + chr(34) + "variable not found: " + chr(34) + " + name)");
+puts("}");
+puts("func (c *Context2) Exists(name string) bool {");
+puts("for ctx := c; ctx != nil; ctx = ctx.parent {");
+puts("if _, ok := ctx.variables[name]; ok { return true }");
+puts("}");
+puts("return false");
+puts("}");
+puts("func (c *Context2) Create(name string, value Value2) Value2 {");
+puts("if c.variables == nil { c.variables = make(map[string]Value2) }");
+puts("c.variables[name] = value");
+puts("return value");
+puts("}");
+puts("func (c *Context2) Update(name string, value Value2) Value2 {");
+puts("for ctx := c; ctx != nil; ctx = ctx.parent {");
+puts("if _, ok := ctx.variables[name]; ok { ctx.variables[name] = value; return value }");
+puts("}");
+puts("return c.Create(name, value)");
+puts("}");
+puts("// --- Command2 + FunctionCommand2 (Value2-based) ---");
+puts("type Command2 interface {");
+puts("Execute(ctx *Context2, params *ArrayValue2) Value2");
+puts("String() string");
+puts("IsTruthy() bool");
+puts("IsInvalid() bool");
+puts("}");
+puts("type FunctionCommand2 struct {");
+puts("definitionCtx *Context2");
+puts("executeFunc   func(*Context2, *ArrayValue2) Value2");
+puts("}");
+puts("func (c *FunctionCommand2) Execute(callerCtx *Context2, params *ArrayValue2) Value2 {");
+puts("return c.executeFunc(NewContext2(c.definitionCtx), params)");
+puts("}");
+puts("func (c *FunctionCommand2) String() string { return " + chr(34) + "function" + chr(34) + " }");
+puts("func (c *FunctionCommand2) IsTruthy() bool { return true }");
+puts("func (c *FunctionCommand2) IsInvalid() bool { return false }");
+puts("func NewFunctionCommand2(defCtx *Context2, fn func(*Context2, *ArrayValue2) Value2) Command2 {");
+puts("return &FunctionCommand2{definitionCtx: defCtx, executeFunc: fn}");
+puts("}");
+puts("// --- end Value2 helpers ---");
+puts("");
 puts("type Value interface {");
 puts("Add(other Value) Value");
 puts("Subtract(other Value) Value");
