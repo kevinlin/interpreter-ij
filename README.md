@@ -419,7 +419,7 @@ It checks (1) interpreted `test.s` output, (2) self-hosted `test.s` output, (3) 
 
 ### Current Numbers
 
-Measured on macOS/arm64 via `echo hi | ./selfhosted_interpreter.sh sample.s`:
+Measured on macOS/arm64 via `echo hi | ./selfhosted_interpreter.sh ./src/sample.s`:
 
 | Phase | Time | Speedup vs. baseline |
 |---|---|---|

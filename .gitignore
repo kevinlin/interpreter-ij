@@ -1,7 +1,7 @@
+app
+app.go
 bench.log
 
-src/app
-src/app.go
 src/inputmock.s
 src/interpreter_base.s
 src/mcp-in.json
