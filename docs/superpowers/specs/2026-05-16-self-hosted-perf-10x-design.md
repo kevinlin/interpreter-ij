@@ -413,7 +413,7 @@ def bubbleSort(arr) {
 // 50-element reverse-sorted input
 let xs = [];
 let k = 50;
-while (k > 0) { xs = append(xs, k); k = k - 1; }
+while (k > 0) { xs = push(xs, k); k = k - 1; }
 bubbleSort(xs);
 puts(xs[0]);
 puts(xs[49]);

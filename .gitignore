@@ -1,6 +1,5 @@
 app
 app.go
-bench.log
 
 src/inputmock.s
 src/interpreter_base.s

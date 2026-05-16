@@ -17,5 +17,9 @@ STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   { time (echo "hi" | ./interpreter.sh src/sample.s >/dev/null); } 2>&1
   echo "-- native_interpreter.sh src/test.s --"
   { time (echo "hi" | ./native_interpreter.sh src/sample.s >/dev/null); } 2>&1
+  echo "-- selfhosted_interpreter.sh bench_eval.s --"
+  { time (echo | ./selfhosted_interpreter.sh src/bench_eval.s >/dev/null); } 2>&1
+  echo "-- native_interpreter.sh bench_eval.s --"
+  { time (echo | ./native_interpreter.sh src/bench_eval.s >/dev/null); } 2>&1
   echo
 } | tee -a "$LOG"
