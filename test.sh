@@ -1,2 +1,2 @@
 #!/bin/bash
-echo|./interpreter.sh test.s
+echo|./interpreter.sh src/test.s

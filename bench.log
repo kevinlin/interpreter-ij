@@ -1,0 +1,17 @@
+=== 2026-05-16T04:31:31Z label=run-0 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m12.664s
+user	3m5.851s
+sys	0m2.343s
+-- interpreter.sh test.s --
+
+real	0m2.310s
+user	0m5.193s
+sys	0m0.212s
+-- native_interpreter.sh test.s --
+
+real	0m0.065s
+user	0m0.026s
+sys	0m0.022s
+

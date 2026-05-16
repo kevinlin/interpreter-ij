@@ -1,12 +1,16 @@
-update.sh
-sample
-interpreter_base.s
-mcp_eval.s
-app
-app.go
-inputmock.s
-sample2.json
-sort.s
-sort
-mcp-in.json
 bench.log
+
+src/app
+src/app.go
+src/inputmock.s
+src/interpreter_base.s
+src/mcp-in.json
+src/mcp_eval.s
+src/sample
+src/sample2.json
+src/sort
+src/sort.s
+src/update.sh
+
+# Cursor
+.history/

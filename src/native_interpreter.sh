@@ -2,6 +2,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Detect OS
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -21,7 +24,7 @@ case "$ARCH" in
 esac
 
 # Construct binary name
-BINARY="./mcp_${OS_NAME}_${ARCH_NAME}"
+BINARY="$PROJECT_ROOT/interpreter_${OS_NAME}_${ARCH_NAME}"
 
 # Check if the binary exists
 if [[ ! -x "$BINARY" ]]; then
@@ -29,4 +32,4 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-./$BINARY
+(echo "//multiline" && cat $1 && echo "//<EOF>" && cat) | "$BINARY"

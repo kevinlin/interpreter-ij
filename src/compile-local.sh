@@ -8,6 +8,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
@@ -21,7 +24,7 @@ case "$ARCH" in
     *)       echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-BINARY="./interpreter_${OS_NAME}_${ARCH_NAME}"
+BINARY="$PROJECT_ROOT/interpreter_${OS_NAME}_${ARCH_NAME}"
 if [[ ! -x "$BINARY" ]]; then
     echo "No suitable binary found for $OS_NAME on $ARCH_NAME." >&2
     exit 1

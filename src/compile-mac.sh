@@ -2,6 +2,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Detect OS
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -21,7 +24,7 @@ case "$ARCH" in
 esac
 
 # Construct binary name
-BINARY="./interpreter_${OS_NAME}_${ARCH_NAME}"
+BINARY="$PROJECT_ROOT/interpreter_${OS_NAME}_${ARCH_NAME}"
 
 # Check if the binary exists
 if [[ ! -x "$BINARY" ]]; then
@@ -29,7 +32,7 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-(echo "//multiline" && cat $1 && echo "//<GO2>") | ./$BINARY | bash
+(echo "//multiline" && cat $1 && echo "//<GO2>") | "$BINARY" | bash
 
 # Start: Reproducible build (optional)
 docker run --rm -v "$PWD":/src -w /src -e SOURCE_DATE_EPOCH=1609459200 -e GOARCH=arm64 -e GOOS=darwin -e CGO_ENABLED=0 golang:1.23.5 sh -c 'go build -trimpath -ldflags="-buildid= -X main.version=1.0.0 -w -s" app.go'

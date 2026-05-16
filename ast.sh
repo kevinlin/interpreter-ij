@@ -1,3 +1,4 @@
 #!/bin/bash
 
-(echo "//multiline" && cat $1 && echo "//<AST>") | ./native_interpreter.sh interpreter.s
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+(echo "//multiline" && cat $1 && echo "//<AST>") | "$SCRIPT_DIR/src/native_interpreter.sh" "$SCRIPT_DIR/src/interpreter.s"
