@@ -733,8 +733,16 @@ def assignmentStatementToJson(self) {
 }
 
 def assignmentStatementToGo(self) {
-    // Phase 2: emit Node tree; evalAssign handles ctx.Update/Create
-    print('&Node{kind: nkAssign, name: "' + self["name"] + '", right: ');
+    // Phase 2.5: project resolver annotation so evalAssign can skip the
+    // ctx.Exists + ctx.Update two-walks-per-write cost on the rkParam /
+    // rkLocal / rkLib hot paths. Unannotated nodes (the bootstrap
+    // identity case) fall through to the default Exists/Update/Create.
+    print('&Node{kind: nkAssign, name: "' + self["name"] + '"');
+    if (self["resolvedKind"] != null) {
+        print(", resolvedKind: ");
+        print(resolverKindCode(self["resolvedKind"], self["resolvedOrigin"]));
+    }
+    print(', right: ');
     if (self["value"]["toGo"] != null) {
         self["value"]["toGo"](self["value"]);
     }
@@ -1937,9 +1945,11 @@ def identifierToJson(self) {
 
 def identifierToGo(self) {
     // Phase 2.5: project resolver annotations onto Node so evalIdent can
-    // dispatch on resolvedKind and skip the ctx.Get chain walk for
-    // rkParam/rkLocal/rkLib/rkUpvalue. Unannotated nodes fall through to
-    // the chain-walk fallback in evalIdent.
+    // dispatch on resolvedKind. Only the rkLib fast path is actually wired
+    // through to a fast lookup today (rootCtx.GetLocal); the other
+    // resolvedKind values still fall through evalIdent's default ctx.Get
+    // chain walk because rkParam / rkLocal cannot use GetLocal until
+    // P2.5.6 collapses the per-block *Context allocation.
     print('&Node{kind: nkIdent, name: "' + self["name"] + '"');
     if (self["resolvedKind"] != null) {
         print(", resolvedKind: ");
@@ -4358,8 +4368,14 @@ def variableDeclarationToJson(self) {
 }
 
 def variableDeclarationToGo(self) {
-    // Phase 2: emit Node tree; evalVarDecl handles ctx.Create
+    // Phase 2.5: project resolver annotation. evalVarDecl currently ignores
+    // it (every binding goes into the current ctx regardless), so this is
+    // documentation-only until P4 slot-indexed contexts care about it.
     print('&Node{kind: nkVarDecl, name: "' + self["name"] + '"');
+    if (self["resolvedKind"] != null) {
+        print(", resolvedKind: ");
+        print(resolverKindCode(self["resolvedKind"], self["resolvedOrigin"]));
+    }
     let init = self["initializer"];
     if (init != null) {
         print(', right: ');
@@ -5261,10 +5277,14 @@ puts("}");
 puts("return vInvalid(" + chr(34) + "unknown node kind" + chr(34) + "), false");
 puts("}");
 puts("func evalIdent(n *Node, ctx *Context) (Value, bool) {");
-puts("switch n.resolvedKind {");
-puts("case rkParam, rkLocal: return ctx.GetLocal(n.name), false");
-puts("case rkLib: return rootCtx.GetLocal(n.name), false");
-puts("}");
+puts("// Phase 2.5: only rkLib gets the GetLocal fast-path. rkParam/rkLocal");
+puts("// look correct on paper but evalBlock/evalFuncDecl create per-block");
+puts("// *Context children, so a function-scope `let` lives in the function's");
+puts("// local ctx while a nested-block ident resolves with the inner block's");
+puts("// ctx -- GetLocal would miss the binding. Wait for P2.5.6's evalBlock");
+puts("// hasLocals gate (which collapses block ctxs into the function ctx)");
+puts("// before fast-pathing rkParam/rkLocal.");
+puts("if n.resolvedKind == rkLib { return rootCtx.GetLocal(n.name), false }");
 puts("return ctx.Get(n.name), false");
 puts("}");
 puts("func evalInfix(n *Node, ctx *Context) (Value, bool) {");
@@ -5304,6 +5324,19 @@ puts("}");
 puts("func evalAssign(n *Node, ctx *Context) (Value, bool) {");
 puts("v, ret := eval(n.right, ctx)");
 puts("if ret { return v, true }");
+puts("// Phase 2.5: only the EXPLICITLY-annotated non-default kinds get fast");
+puts("// paths. rkGlobal is the Go-zero default (0) so it would catch every");
+puts("// unannotated nkAssign (any node still emitted by an older bootstrap");
+puts("// emitter) -- those must continue through the chain-walk fallback to");
+puts("// preserve `x = ...; <undeclared>` -> create-in-current-ctx semantics.");
+puts("switch n.resolvedKind {");
+puts("case rkParam, rkLocal:");
+puts("ctx.Update(n.name, v)");
+puts("return v, false");
+puts("case rkLib:");
+puts("rootCtx.UpdateLocal(n.name, v)");
+puts("return v, false");
+puts("}");
 puts("if ctx.Exists(n.name) { ctx.Update(n.name, v) } else { ctx.Create(n.name, v) }");
 puts("return v, false");
 puts("}");
@@ -5335,7 +5368,10 @@ puts("if n.right != nil {");
 puts("var ret bool; v, ret = eval(n.right, ctx)");
 puts("if ret { return v, true }");
 puts("}");
-puts("ctx.Create(n.name, v)");
+puts("// A new `let` ALWAYS binds in the current ctx, regardless of how the");
+puts("// resolver classifies the pre-existing name. UpdateLocal is just");
+puts("// Create without the function-call overhead of going through Create.");
+puts("ctx.UpdateLocal(n.name, v)");
 puts("return v, false");
 puts("}");
 puts("func evalIf(n *Node, ctx *Context) (Value, bool) {");

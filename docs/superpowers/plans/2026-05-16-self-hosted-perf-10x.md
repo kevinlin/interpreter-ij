@@ -1737,13 +1737,15 @@ git commit -m "perf/p2.5: evalIdent switches on resolvedKind, skips chain walk f
 
 ---
 
-### Task 2.5.5: Project resolver annotations from assignment / var-decl emitters
+### Task 2.5.5: Project resolver annotations from assignment / var-decl emitters [shipped]
+
+**Status: shipped 2026-05-17.** All steps below are checked; see deviations recorded at the bottom of the task for the final shape.
 
 **Files:**
 - Modify: `src/interpreter.s:735` — `assignmentStatementToGo`.
 - Modify: `src/interpreter.s:4336` — `variableDeclarationToGo`.
 
-- [ ] **Step 1: Update `assignmentStatementToGo`**
+- [x] **Step 1: Update `assignmentStatementToGo`**
 
 Locate the `&Node{kind: nkAssign, name: "<raw>", right: ...}` emit. Add a `resolvedKind` field after `name`:
 
@@ -1756,11 +1758,11 @@ if (self["resolvedKind"] != null) {
 print(', right: ');
 ```
 
-- [ ] **Step 2: Update `variableDeclarationToGo` similarly**
+- [x] **Step 2: Update `variableDeclarationToGo` similarly**
 
 Same pattern: if the decl carries `resolvedKind` / `resolvedOrigin`, emit them on the `&Node{kind: nkVarDecl, ...}` literal.
 
-- [ ] **Step 3: Update `evalAssign` to short-circuit on `resolvedKind`**
+- [x] **Step 3: Update `evalAssign` to short-circuit on `resolvedKind`**
 
 In runtime emit (`5258-5263`), replace:
 
@@ -1792,21 +1794,69 @@ puts("return v, false");
 puts("}");
 ```
 
-- [ ] **Step 4: `evalVarDecl` similarly**
+- [x] **Step 4: `evalVarDecl` similarly**
 
 In runtime emit (`5286-5294`), `evalVarDecl` already calls `ctx.Create(n.name, v)` which lazily allocates the local map. The fast-path equivalent is `ctx.UpdateLocal(n.name, v)` — same effect. Replace `ctx.Create` with `ctx.UpdateLocal` for `rkLocal` / `rkParam`. Keep `rkGlobal` routing to `rootCtx.UpdateLocal`.
 
-- [ ] **Step 5: Build, test, verify**
+- [x] **Step 5: Build, test, verify**
 
 Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t5 && ./scripts/test.sh && ./scripts/verify.sh`
 Expected: tests + checks 1–4 pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/interpreter.s
 git commit -m "perf/p2.5: evalAssign/evalVarDecl short-circuit on resolvedKind"
 ```
+
+#### Deviations from the original step shapes (recorded after shipping)
+
+The final shape of `evalAssign` deviates from the snippet in Step 3 in two ways
+that are load-bearing for the IJ test suite:
+
+1. **`rkGlobal` is NOT in the `switch`.** `rkGlobal` is the Go-zero default of
+   `uint8`, so any pre-P2.5 / unannotated `nkAssign` literal carries
+   `resolvedKind == 0 == rkGlobal`. Routing those through
+   `rootCtx.UpdateLocal` writes them at root instead of inside their
+   originating ctx, which silently destroys IJ's "first assignment creates
+   the binding in the current ctx" semantics. The shipped switch handles only
+   the explicitly-set non-default kinds (`rkParam`, `rkLocal`, `rkLib`);
+   everything else falls through to the original `ctx.Exists` /
+   `ctx.Update` / `ctx.Create` path.
+2. **`rkParam` / `rkLocal` use `ctx.Update`, not `ctx.UpdateLocal`.** The
+   resolver may mark a binding `rkLocal` while runtime keeps it in a
+   *parent* `*Context` (function-local ctx, when the current ctx is a
+   per-iteration block ctx that `evalBlock` allocated). `UpdateLocal` would
+   miss the binding and create a fresh one in the block ctx. `ctx.Update`
+   correctly walks the chain to find the existing binding. Only `rkLib` uses
+   `rootCtx.UpdateLocal` because library functions are guaranteed to live in
+   `rootCtx.variables`.
+
+`evalIdent` (Task 2.5.4 fast paths) was likewise reduced to **only**
+`rkLib → rootCtx.GetLocal`; the `rkParam` / `rkLocal → ctx.GetLocal` shapes
+remain disabled until Task 2.5.6 collapses the per-block ctx so the function
+ctx is the current ctx for these reads. Until then they fall through to the
+chain-walking `ctx.Get`.
+
+`evalVarDecl` is `ctx.UpdateLocal` unconditionally — functionally identical
+to the previous `ctx.Create` (both write to the current ctx's map; the
+former just opens out the function-call cost of going through `Create`).
+
+The runtime-emit edits live at `src/interpreter.s` ~5260, 5310, 5354 (post-
+edit line numbers shift up slightly because of added comment lines).
+
+#### Bench delta
+
+`p2_5-resolver-wired = 1m17.250s` vs `p2-no-refresh = 1m20.478s` → 1.04× —
+within noise; below the 1.3× drop-rule threshold at this commit. **The drop
+rule is not waived; the lever is gated behind the committed-binary replace.**
+The selfhosted bench runs the *committed* binary as the IJ interpreter, and
+that binary is the pre-P2.5 bridge whose tree-walker is unaware of the new
+annotations. Real-world fast-path payoff only fires after `verify.sh`
+check 5 promotes from determinism to true fixed-point — which is itself
+gated on the P2 stage2 scalar-VarDecl regression. P2.5.5 ships as wiring +
+correctness; P2.5.6/2.5.7/2.5.8 will harvest the gain.
 
 ---
 

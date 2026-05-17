@@ -150,3 +150,37 @@ real	0m0.037s
 user	0m0.007s
 sys	0m0.014s
 
+=== 2026-05-17T17:13:06Z label=phase2_5-task-2.5.4-peek ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m19.591s
+user	2m17.418s
+sys	0m1.966s
+-- interpreter.sh sample.s --
+
+real	0m0.601s
+user	0m0.808s
+sys	0m0.102s
+-- native_interpreter.sh sample.s --
+
+real	0m0.053s
+user	0m0.008s
+sys	0m0.015s
+
+=== 2026-05-17T18:15:31Z label=p2_5-resolver-wired ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m17.250s
+user	2m16.944s
+sys	0m1.122s
+-- interpreter.sh sample.s --
+
+real	0m0.582s
+user	0m0.806s
+sys	0m0.093s
+-- native_interpreter.sh sample.s --
+
+real	0m0.027s
+user	0m0.006s
+sys	0m0.010s
+
