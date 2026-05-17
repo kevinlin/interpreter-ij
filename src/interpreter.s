@@ -5261,6 +5261,10 @@ puts("}");
 puts("return vInvalid(" + chr(34) + "unknown node kind" + chr(34) + "), false");
 puts("}");
 puts("func evalIdent(n *Node, ctx *Context) (Value, bool) {");
+puts("switch n.resolvedKind {");
+puts("case rkParam, rkLocal: return ctx.GetLocal(n.name), false");
+puts("case rkLib: return rootCtx.GetLocal(n.name), false");
+puts("}");
 puts("return ctx.Get(n.name), false");
 puts("}");
 puts("func evalInfix(n *Node, ctx *Context) (Value, bool) {");
@@ -5442,6 +5446,7 @@ def programToGoPhase2(self) {
     puts("}");
     puts("}");
     puts("ctx := NewContext(nil)");
+    puts("rootCtx = ctx");
     puts("registerLibraryFunctions(ctx)");
     puts("defer func() {");
     puts("if os.Getenv(" + chr(34) + "IJ_COUNTERS" + chr(34) + ") != " + chr(34) + chr(34) + " {");
