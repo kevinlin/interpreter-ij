@@ -218,3 +218,20 @@ real	0m0.024s
 user	0m0.007s
 sys	0m0.011s
 
+=== 2026-05-17T20:06:24Z label=p2-stage2-regression-fix ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m17.810s
+user	2m17.330s
+sys	0m1.112s
+-- interpreter.sh sample.s --
+
+real	0m0.593s
+user	0m0.786s
+sys	0m0.087s
+-- native_interpreter.sh sample.s --
+
+real	0m0.023s
+user	0m0.006s
+sys	0m0.010s
+

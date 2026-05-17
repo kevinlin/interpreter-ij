@@ -1201,13 +1201,19 @@ def evaluateFunctionDeclaration(node, context) { // FIXME really?
 }
 
 // Helper: isReturnValue(result)
-// Checks if result is a map with key "isReturnValue" set to true
+// Checks if result is a map with key "isReturnValue" set to true.
+// MUST type-check before indexing: under Phase-2 emit, scalar[key] returns
+// tInvalid, which evalInfix/evalProgram propagate as a fatal abort. The
+// IJ tree-walker frequently calls this with non-map results (e.g. a puts
+// callee returning Value{tag:tInt,i:0}) — without the isMap guard, every
+// non-map statement result terminates the surrounding evaluate-loop.
 def isReturnValue(result) {
     if (result == null) {
         return false;
     }
-    // Only check maps - skip type check for performance
-    // Direct access is safe in IJ
+    if (!isMap(result)) {
+        return false;
+    }
     return result[returnValueIndicatorMagicValue] == true;
 }
 
