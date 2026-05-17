@@ -1936,8 +1936,16 @@ def identifierToJson(self) {
 }
 
 def identifierToGo(self) {
-    // Phase 2: all identifiers become Node tree references; evalIdent resolves via ctx.Get
-    print('&Node{kind: nkIdent, name: "' + self["name"] + '"}');
+    // Phase 2.5: project resolver annotations onto Node so evalIdent can
+    // dispatch on resolvedKind and skip the ctx.Get chain walk for
+    // rkParam/rkLocal/rkLib/rkUpvalue. Unannotated nodes fall through to
+    // the chain-walk fallback in evalIdent.
+    print('&Node{kind: nkIdent, name: "' + self["name"] + '"');
+    if (self["resolvedKind"] != null) {
+        print(", resolvedKind: ");
+        print(resolverKindCode(self["resolvedKind"], self["resolvedOrigin"]));
+    }
+    print('}');
 }
 
 
