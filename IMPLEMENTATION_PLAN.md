@@ -2,8 +2,9 @@
 
 **Goal:** `./scripts/bench.sh` self-hosted (`selfhosted_interpreter.sh src/sample.s`, stdin=`hi`) ≤ 7s wall on macOS/arm64. Baseline ~70s. Need ≥10× cumulative.
 
-**Spec:** `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md`
-**Phased plan:** `docs/superpowers/plans/2026-05-16-self-hosted-perf-10x.md`
+**Spec:** `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md` (revised 2026-05-18 with status update + new Phase 2.5)
+**Phased plan:** `docs/superpowers/plans/2026-05-16-self-hosted-perf-10x.md` (revised 2026-05-18 with Phase 2.5 task block)
+**Research / current-state map:** `docs/research/2026-05-18-interpreter-perf-research.md` (authoritative line-by-line audit of `src/interpreter.s` at HEAD `c42261c`)
 
 ---
 
@@ -20,11 +21,13 @@
 | p1-dead-code-cleanup (15:32Z) | 1m21.306s | 0.88× (1.10× vs phase2-current) | ✅ dead D2-prep walks removed |
 | **p2-no-refresh (16:32Z)** | **1m20.478s** | **0.88× (1.01× vs p1)** | ✅ refreshToGoPointers excised; stage2 emits valid main() |
 
-**Headline:** committed HEAD binary passes verify.sh 5/5. Phase-2 self-host bench is 0.88× vs phase0 — still off the 10× target, but the path forward no longer requires a phase revert. The 02:13Z 49s outlier was forensically reproduced and shown to be a dual-runtime artifact (see "P1 forensics" below). The new floor is **p2-no-refresh = 1m20.478s**; next loop targets ≥1.3× of that via P3 interning.
+**Headline:** committed HEAD binary passes verify.sh 5/5. Phase-2 self-host bench is 0.88× vs phase0 — still off the 10× target, but the path forward no longer requires a phase revert. The 02:13Z 49s outlier was forensically reproduced and shown to be a dual-runtime artifact (see "P1 forensics" below). The new floor is **p2-no-refresh = 1m20.478s**.
 
-Phase 0 ✅ • Phase 1 ✅ committed • Phase 2 ✅ wired, regression root-caused + partially recovered • Phase 3 ⬜ • Phase 4 ⬜
+**Next-loop target = P2.5 (NEW, added 2026-05-18):** activate the resolver annotations that Phase 2 wired structurally but never reads. Research doc §3.2 confirms every `*ToGo` emitter ignores `resolvedKind`/`resolvedOrigin`/`resolvedName`/`resolvedAtRoot`/`resolvedScope`/`resolvedLocals`/`resolvedIsStatic`; six `Node` fields are dead weight; `evalIdent` is `ctx.Get(string)` chain-walk per identifier; `evalBlock` always allocates Context even for blocks with zero `let`. P2.5 ships as ≥1.3× over `p2-no-refresh` per the per-phase drop rule. Detailed spec in `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md` §"Phase 2.5"; detailed task block in `docs/superpowers/plans/2026-05-16-self-hosted-perf-10x.md` §Phase 2.5 (Tasks 2.5.1–2.5.8).
 
-**P2 status (this loop):** Phase-2 emit pipeline is now reproducible at the source level (stage2≡stage3 byte-identical). Replacing the committed bridge bootstrap with a clean Phase-2 self-build is BLOCKED on a separate stage2 IJ-tree-walker bug ("scalar-VarDecl regression" — see P2 section). Source change shipped; committed binary unchanged.
+Phase 0 ✅ • Phase 1 ✅ committed • Phase 2 ✅ wired structurally; semantically incomplete (resolver annotations dead) • **Phase 2.5 ⬜ NEXT** • Phase 3 ⬜ (demoted: smaller lever than P2.5) • Phase 4 ⬜
+
+**P2 status (current — pre-P2.5):** Phase-2 emit pipeline is reproducible at the source level (stage2≡stage3 byte-identical). Replacing the committed bridge bootstrap with a clean Phase-2 self-build is BLOCKED on a separate stage2 IJ-tree-walker bug ("scalar-VarDecl regression" — see P2 section below). **This blocker DOES NOT prevent P2.5 source work** — `compile-local.sh src/interpreter.s` builds against the existing bootstrap and the P2.5 emitter changes are exercised by the resulting binary. Only the committed-binary-replace step at the end of P2.5 is gated on the regression fix.
 
 ### P0 completed (2026-05-17 ~14:44Z)
 
@@ -40,11 +43,11 @@ Phase 0 ✅ • Phase 1 ✅ committed • Phase 2 ✅ wired, regression root-cau
 
 ### P0 — Ground truth + measurement hygiene (do first, no perf change)
 
-All P0 items completed 2026-05-17 ~14:44Z. See *P0 completed* note above for evidence. Floor = `phase2-current = 1m29.188s`. Next loop starts at P1.
+All P0 items completed 2026-05-17 ~14:44Z. See *P0 completed* note above for evidence. Floor at the time = `phase2-current = 1m29.188s`. Floor now (after p1-cleanup + p2-no-refresh) = `p2-no-refresh = 1m20.478s`. **Next loop starts at P2.5** (P0/P1 resolved; P2 carried as a non-blocking-for-P2.5 backlog item).
 
 ### P1 — ✅ RESOLVED: Phase 2 regression triage
 
-**Verdict: drop-rule does not fire.** Triage forensics below; the "Phase 2 regression vs 49s baseline" narrative was based on a non-reproducible data point. Real Phase 1 → Phase 2 perf delta is < 5%. Cleanup of dead D2-prep work alone recovers 1.10× over phase2-current. Continue to P3.
+**Verdict: drop-rule does not fire.** Triage forensics below; the "Phase 2 regression vs 49s baseline" narrative was based on a non-reproducible data point. Real Phase 1 → Phase 2 perf delta is < 5%. Cleanup of dead D2-prep work alone recovers 1.10× over phase2-current. **Next-loop direction: P2.5 (activate dead resolver annotations)** — research doc §3.2 confirms this is the highest-leverage available change at HEAD.
 
 **P1 forensics (worktree benches, 2026-05-17 ~23:00Z):**
 
@@ -96,9 +99,32 @@ Phase 2 IS kept. P2 is now the bridge to a clean self-build so the committed bin
 - [ ] **Patch `fix_app_go.py` to harden all lib-fn `params.Get(Value{tag: tInt, i: N})` call sites** with bounds checks. Mechanical sed; ~30 lib fns. Defensive depth even if not strictly needed.
 - [ ] **Replace committed `interpreter_mac_arm64` + tighten `verify.sh` check 5.** Only after the regression above lands. The replacement is what makes `verify.sh` check 5 a TRUE fixed-point check (stage1 install → stage2 build → diff) instead of mere determinism.
 
+### P2.5 — Activate resolver annotations (NEW, added 2026-05-18; expected 2–3× over p2-no-refresh)
+
+Per design §"Phase 2.5 — Activate Resolver Annotations" (revised 2026-05-18). Research evidence: `docs/superpowers/research/2026-05-18-interpreter-perf-research.md` §3.2 (all resolver annotations dead) + §3.1 (six dead Node fields) + §2.2 (`Context.Get` chain-walk cost) + §2.4 (`evalBlock` always allocs) + §3.10 (wasted `FunctionCommand.Execute` ctx alloc).
+
+**Why this is next, not P3:** the resolver pass already runs and writes per-node annotations (`resolvedKind`, `resolvedOrigin`, `resolvedName`, `resolvedAtRoot`, `resolvedLocals`, `resolvedIsStatic`). Every cost is paid; zero benefit harvested. Wiring the projection + read sites is the highest-leverage available change because `evalIdent` is on every recursive eval frame. P3 (string interning) is a smaller lever — it saves a string-header alloc per literal but does NOT reduce `ctx.Get` chain walks (the dominant cost).
+
+**Pre-flight for P2.5:** the P2 stage2-runtime regression does NOT block P2.5 source work. P2.5 edits `interpreter.s` only; `compile-local.sh src/interpreter.s` builds against the existing committed bootstrap and exercises every P2.5 emitter change. The committed-binary replace step (Task 2.5.8 Step 2) IS gated on the P2 regression fix, but the bench number from Step 3 is honest before that.
+
+- [ ] **Task 2.5.1: Scaffold `rk*` constants + `hasLocals` field + `Context.GetLocal`/`UpdateLocal` + `var rootCtx`.** Add to runtime emit (`goLibPrefix`). No behavior change. Build + test green. Ref: design §Phase 2.5 "New shape (emitted Go)".
+- [ ] **Task 2.5.2: Add `resolverKindCode(kind, origin)` IJ-side helper** that maps the resolver's string-tagged annotation to the numeric `rk*` constant.
+- [ ] **Task 2.5.3: Project `resolvedKind`/`resolvedOrigin` from `identifierToGo`** (`src/interpreter.s:1922`). Annotations now ride on every emitted `&Node{kind: nkIdent, ...}`; `evalIdent` still uses chain-walk fallback at this commit. Verify check 5 determinism.
+- [ ] **Task 2.5.4: Switch `evalIdent` to dispatch on `resolvedKind`** (`src/interpreter.s:5221-5223`). `rkParam`/`rkLocal` → `ctx.GetLocal`; `rkLib` → `rootCtx.GetLocal`; `rkUpvalue` → single-hop walk; fallback → `ctx.Get`. Capture `rootCtx` in `programToGoPhase2`. **First measurable win — bench should show ≥1.3× over p2-no-refresh after this task alone.**
+- [ ] **Task 2.5.5: Project + dispatch `evalAssign` / `evalVarDecl` on `resolvedKind`.** `assignmentStatementToGo` (`735`) + `variableDeclarationToGo` (`4336`) emit `resolvedKind`; runtime `evalAssign` (`5258`) + `evalVarDecl` (`5286`) short-circuit on it. Eliminates the `Exists`+`Update` two-walks-per-write cost.
+- [ ] **Task 2.5.6: Gate `evalBlock` Context allocation on `hasLocals`.** `blockStatementToGo` (`1100`) projects `hasLocals: true` only when `resolvedLocals` non-empty; `evalBlock` (`5275`) skips `NewContext(ctx)` when `hasLocals == false`. Eliminates per-iteration Context alloc inside `while` loops with no `let` (the `sample.s` shape).
+- [ ] **Task 2.5.7: Drop the wasted `FunctionCommand.Execute` Context alloc.** Pass `nil` instead of `NewContext(c.definitionCtx)` — closure body discards `callerCtx` anyway (research §3.10). One fewer `*Context` per function call.
+- [ ] **Task 2.5.8: Re-baseline check 5 (source-level fixed-point), bench `phase2_5-resolver-wired`, drop-rule check.** Drop-rule: ≥1.3× over `p2-no-refresh = 1m20.478s`. Cumulative: if ≥10× over `phase0-baseline = 1m11.153s`, **stop and ship — skip P3 + P4**. Replace committed binary IF the P2 stage2-regression item is closed.
+
+**Out of P2.5 scope (deferred):**
+- D2 reborn: emitting `ij_<name>_impl(ctx, a, b)` fixed-arity Go functions + direct call-site dispatch. (Lift `resolvedIsStatic` into emit to enable this in a follow-up phase.)
+- D3 reborn: routing if/while conditions through raw-`bool` helpers (`EqualsBool`, `LessThanBool`). The `fix_app_go.py`-injected helpers already exist and are dead — wiring them is a separate small task.
+- Slot-indexed contexts (Phase 4 territory).
+- String interning (Phase 3 territory).
+
 ### P3 — Phase 3: String interning + singletons (expected 1.3–1.8×)
 
-Per design §Phase 3. Only start once P1 + P2 are settled.
+Per design §Phase 3. **Only start once P2.5 is settled and cumulative speedup is < 10×.**
 
 - [ ] **Singletons in `goLibPrefix`.** Emit `vNull`, `vTrue`, `vFalse`, `vEmpty`, `smallInt[256]` ([-128..127]), `strPool []Value` package-level vars + `init()` populating `smallInt`. Helper `vIntFast(i int64) Value` (cache hit for small, else fresh `Value`).
 - [ ] **Route eval literal dispatch through singletons.** Update `eval()` cases in goLibPrefix:
@@ -126,10 +152,45 @@ Only if cumulative speedup after P3 < 10×. Per design §Phase 4.
 
 ### P5 — Cleanup once 10× hit
 
-- [ ] **README perf section update.** Append phase1–phaseN rows to the speedup table; one-paragraph description per phase; D1/D2/D3 lessons captured if D1/D2 ended up reborn under Phase 2.
+- [ ] **README perf section update.** Append phase1–phaseN rows to the speedup table; one-paragraph description per phase; D1/D2/D3 lessons captured if D1/D2 ended up reborn under Phase 2.5 (or a follow-up).
 - [ ] **Remove `cleanup_phase1.py`** if no longer referenced (verify with `rg cleanup_phase1`).
-- [ ] **Remove `scripts/fix_app_go.py`** once the committed binary is fully Phase-2-clean and the legacy hybrid bridge isn't needed for any pipeline step (currently it's the load-bearing post-processor for `compile-local.sh`; removing prematurely breaks the build).
+- [ ] **Remove `scripts/fix_app_go.py`** once the committed binary is fully Phase-2-clean and the legacy hybrid bridge isn't needed for any pipeline step (currently it's the load-bearing post-processor for `compile-local.sh`; removing prematurely breaks the build). Note: per research §3.5 the post-processor's `EqualsBool`-family helper injection is dead code that piggybacks on the rename bridge — both go away together.
 - [ ] **Garbage-collect tree-walker `evaluate` path** in `interpreter.s`. Phase 2 codegen produces `&Node{...}` literals consumed by emitted `eval()` in Go — the IJ-side `node["evaluate"]` callable entries are still used by `scripts/interpreter.sh` (tree-walker) and by AST-emit JSON. Audit which `evaluate*` functions are reachable from `scripts/interpreter.sh src/sample.s` and `scripts/ast.sh`; everything else is dead. Don't strip without dead-code audit — `scripts/interpreter.sh` and the resolver pass both still depend on the IJ-side AST shape.
+- [ ] **Drop the dead Node fields** that P2.5 / future phases do not adopt. After P2.5 ships, audit which of `pos uint32` / `sIdx uint32` / `resolvedSlot int32` / `isStatic bool` are still unused. `resolvedKind` is now live (P2.5); `resolvedName` activates only with D2 reborn; `resolvedSlot` activates only with P4. Anything still unused after P3+P4 land (or after P2.5 hits 10×) is removable for ~10 bytes/Node savings (research §3.1).
+- [ ] **Drop the dead `ijCount*` counters** (`src/interpreter.s:4381-4390`). Declared + dumped on exit but never incremented since `b040672`. Either re-instrument the surviving allocation hot paths (`evalCall`, `evalBlock` allocs, `Context.Get`/`Update` chain walks) or delete the declarations + the `IJ_COUNTERS` env-var dump emit in `programToGoPhase2`.
+- [ ] **Drop the dead `useNodeTree` switch** (`src/interpreter.s:5388`). Phase 2's `programToGoPhase2` is the only path; the `let useNodeTree = true` gate guards a removed Phase-1 emit branch. Trivial cleanup.
+- [ ] **Drop dead `opCodeFor("!")` branch** (`src/interpreter.s:835-851`). `"!"` is prefix-only; `infixExpressionToGo` never asks for it. Trivial.
+
+---
+
+## Research-doc backlog (audit findings, 2026-05-18)
+
+The research doc `docs/superpowers/research/2026-05-18-interpreter-perf-research.md` enumerates dead-code / unused-infrastructure sites in `src/interpreter.s` at HEAD `c42261c`. Most of these are addressed by P2.5 / P3 / P4 / P5 above; this section is the running checklist of what the research found vs what each priority covers.
+
+| Research § | Finding | Addressed by |
+|---|---|---|
+| §2.1 | `Value` struct is 88 bytes, passed by value everywhere | structural, not a cleanup target — measure under P2.5 first |
+| §2.2 | `Context.Get` chain-walks per `evalIdent` | **P2.5 Task 2.5.4** |
+| §2.3 | ~5 heap allocs per `evalCall` | **P2.5 Tasks 2.5.6 + 2.5.7** (block ctx + caller-ctx) |
+| §2.4 | `evalBlock` always allocs Context | **P2.5 Task 2.5.6** |
+| §2.5 | `MapValue.String()` alloc per non-string key | not on hot path for sample.s — defer |
+| §2.6 | `(Value, bool)` return-sentinel branch per node visit | structural; rolling back to `tReturn` is not on the table per research §4.12 |
+| §2.7 | `fix_app_go.py`-injected `EqualsBool`-family helpers are dead | **P5 (`fix_app_go.py` removal)** |
+| §2.8 | String literals emit per occurrence | **P3 (string interning)** |
+| §2.9 | `evalIdent` always misses on Context for library funcs | **P2.5 Task 2.5.4** (`rkLib` direct root lookup) |
+| §3.1 | Six dead `Node` fields | **P5 cleanup** (after P2.5/P3/P4 settle which fields are live) |
+| §3.2 | All resolver annotations dead | **P2.5** (Tasks 2.5.3–2.5.6) |
+| §3.3 | `analyzeIsStatic` walks bodies for nothing | activated by **P2.5 Task 2.5.7** (NewStaticFunctionCommand path) + future D2-reborn task |
+| §3.4 | `useNodeTree` switch permanently true | **P5 cleanup** |
+| §3.5 | Bool helpers + AsValue wrappers wait for caller | **P5 (`fix_app_go.py` removal)** |
+| §3.6 | `ijCount*` counters declared but never incremented | **P5 cleanup** |
+| §3.7 | `opCodeFor("!")` has no caller | **P5 cleanup** |
+| §3.8 | CPU profile hook (`IJ_CPUPROFILE`) | live; use under P2.5 / P3 / P4 measurement |
+| §3.9 | Phase 3 singleton scaffolding present but not emitted | **P3** |
+| §3.10 | `FunctionCommand.Execute` wastes a Context alloc | **P2.5 Task 2.5.7** |
+| §4.5 | Committed binary is one-way bridge; check 5 = determinism | **P2** (carried; blocks committed-binary replace) |
+| §4.7 | `registerLibraryFunctions.func12` (`assert`) length-0 panic | **P2** (carried) |
+| §4.11 | `bench_eval.s` dropped (>5min under Phase 2 codegen) | re-enable after primary bench hits 10× |
 
 ---
 
@@ -139,6 +200,8 @@ Only if cumulative speedup after P3 < 10×. Per design §Phase 4.
 - **The committed `interpreter_mac_arm64` is a bridge.** It was built from `ac2e6f3`-era source that still emitted D1/D2/D3 fast paths, then the source was rewritten in `f7783ed` to remove them. The committed binary therefore has fast-path runtime semantics that NO current `src/interpreter.s` can reproduce. Until P2 ships, treat the committed binary as a one-way artifact — do not lose it (`git restore interpreter_mac_arm64` after any accidental recompile). **Update (this loop):** stage2 emit is now reproducible (s2≡s3) but stage2 RUNTIME still regresses on IJ tree-walker scalar-VarDecl flows; bridge stays in place.
 - **D4 lesson (README):** "looks faster, is slower." Every phase commit must be measured. Counter-lesson from this loop: also "looks slower, is irreproducible" — the 49s 02:13Z bench was real but irreproducible because it depended on a transitional dual-runtime that no longer exists in source form.
 - **MCP regression risk.** verify.sh check 4 PASSES at HEAD. The override pattern (`let oldX = X; def X(...)`) is the MCP-relevant invariant. Any codegen edit touching `functionDeclarationToGo` must re-run verify.sh in full.
+- **P2.5 resolver-classification risk.** The resolver may mis-classify some identifiers (e.g. binding introduced by `let` inside an `if` branch where the if-block scope and the parent scope disagree). Each P2.5 task that switches an emitter on `resolvedKind` keeps an explicit fallback path (`return ctx.Get(n.name)` / `if ctx.Exists(...) { ... }`) for unannotated nodes. If a `vInvalid("variable not found: ...")` regression surfaces, the immediate fix is to leave that emit site annotation-free (`resolvedKind == 0` ⇒ rkGlobal fallback path) until the resolver's mis-classification is found and fixed. Do NOT push P2.5 to land while functional regressions are present — fall back to fallback.
+- **P2.5 `hasLocals` semantics.** The Phase-2 `evalBlock` allocs unconditionally and IJ semantics may rely on the per-block-iteration ctx for `var x = ...; ... { var x = ...; }` shadowing inside `if`/`while` bodies. The resolver's `resolvedLocals` should already classify a shadowing inner `let` as introducing a local, but the `hasLocals` projection must respect that. If `test.s` regressions surface, audit which test relies on per-iteration scoping; the conservative fix is `hasLocals: true` for any block that contains an `IfStatement`/`WhileStatement` even when its top-level `resolvedLocals` is empty.
 
 ## Build & verification reminders
 

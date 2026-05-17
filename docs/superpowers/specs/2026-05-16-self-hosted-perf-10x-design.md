@@ -1,7 +1,51 @@
 # Self-Hosted Interpreter Perf — ≥10× Design
 
 Date: 2026-05-16
-Status: Approved, ready for implementation planning.
+Status: Approved; **revised 2026-05-18 after research review** (see "Status Update" below).
+
+## Status Update — 2026-05-18
+
+After implementing Phase 1 (tagged-union `Value`) and Phase 2 (typed AST `Node`), bench reality vs the original projection:
+
+| Label | Real time | Speedup vs phase0 | Spec target |
+|---|---|---|---|
+| `phase0-baseline` | 1m11.153s | 1.00× | — |
+| `phase2-typed-ast` (post P1+P2 cutover) | 1m25.086s | 0.83× | 4–16× cumulative |
+| `p2-no-refresh` (HEAD, post-cleanup) | 1m20.478s | 0.88× | — |
+
+**The 10× goal is unmet, and the phases as shipped REGRESSED vs phase0.** Root cause is documented in `docs/superpowers/research/2026-05-18-interpreter-perf-research.md` (the research doc is the authoritative current-state map; this section is the design-level summary).
+
+### What actually shipped vs what was spec'd
+
+- **Phase 1 (tagged-union `Value`) — shipped semantically.** `Value` is the 88-byte struct, dispatch is tag-switch, no interface boxing. ✅
+- **Phase 1 cleanup — accidentally REMOVED D1/D2/D3 fast paths.** The pre-Phase-1 codegen had three optimizations layered on top of the old `Value` interface: D1 emitted `<gomanglename>` (Go variable) instead of `ctx.Get("name")` for params/locals/lib-globals; D2 emitted `ij_<name>_impl(ctx, a, b)` fixed-arity static dispatch; D3 emitted `EqualsBool(...)` raw-`bool` helpers for `if`/`while` conditions. The Phase 1 cleanup commit (`fb2b299`) removed these along with the dual runtime. They were never lifted onto the new `Value` shape.
+- **Phase 2 (typed AST `Node`) — shipped STRUCTURALLY ONLY.** The `Node` struct, `eval` switch, and per-kind `evalXxx` functions are emitted and used. ✅ But:
+  - The resolver runs and writes `resolvedKind` / `resolvedOrigin` / `resolvedName` / `resolvedAtRoot` / `resolvedScope` / `resolvedLocals` / `resolvedParamLocals` / `resolvedIsStatic` to every AST node — and **NO `*ToGo` emitter reads any of them.** `mangle(name)` runs and the result is discarded. `analyzeIsStatic` walks every function body and the result is dropped.
+  - The `Node` struct emits 16 fields. **6 are pure dead weight** (`pos`, `sIdx`, `resolvedKind`, `resolvedSlot`, `resolvedName`, `isStatic`) — never written by emitters, never read by runtime.
+  - `evalIdent` at `src/interpreter.s:5221-5223` is `return ctx.Get(n.name), false` — full chain walk + map probe per identifier reference.
+  - `evalBlock` at `5275-5285` unconditionally calls `NewContext(ctx)` — a fresh `*Context` per block, even for blocks with no `let`.
+  - `evalCall` allocates ~5 heap objects per call (`*ArrayValue` + `*Context` × 2, one of which is wasted by `FunctionCommand.Execute`, + lazy map alloc on first `Create`).
+- **`fix_app_go.py` injects `EqualsBool`/`LessThanBool` helpers into every `app.go`** — but emitted Go has zero callers. Pure dead weight from the D3 era.
+
+### Implication for the phase ordering
+
+The original spec ordered phases by expected lever: P1 (boxing) → P2 (AST shape) → P3 (interning) → P4 (slot ctx). After the cleanup-induced regression, the **dominant remaining cost is the dead resolver infrastructure**: every `evalIdent`/`evalAssign` does a parent-chain map walk despite the resolver already knowing the answer at codegen time. Wiring the existing-but-dead annotations into Node + reading them in `eval*` is the single highest-leverage change available.
+
+**Phase ordering revised:**
+
+1. **Phase 2.5 — Activate Resolver Annotations (NEW; was D1/D2 in pre-Phase-1 era).** Project `resolvedKind` / `resolvedName` / `resolvedOrigin` from the IJ-side AST into the `Node` struct at emit time; switch `evalIdent` / `evalAssign` / `evalVarDecl` / `evalFuncDecl` to use them. Reintroduces D1 (static-identifier dispatch). Expected 2–3× because `evalIdent` is on every recursive call.
+2. **Phase 3 (string interning + singletons) — DEMOTED.** Original 1.3–1.8× target stands but the lever is smaller than P2.5; without P2.5, interning saves only the string-header alloc per literal and adds no help to `ctx.Get` chain walks (the dominant cost).
+3. **Phase 4 (slot-indexed contexts) — partially overlaps with P2.5.** The slot index is the natural extension of the resolver annotation projection; if P2.5 hits the cumulative 10× target, P4 may not be needed. If not, P4 finishes the job by replacing the `Context.variables` map probe with `ctx.slots[N]`.
+
+### Other research findings folded into this design
+
+- **`bench_eval.s` (eval-heavy secondary benchmark) was dropped** — current Phase 2 codegen makes it >5min. Re-enable only after primary bench hits 10×.
+- **The 49s outlier** (`bench.log:52`, `run-baseline` at 02:13Z) was an irreproducible artifact from a transitional dual-runtime commit (`c5da0ac`) whose source no longer compiles. It is not a "phase win"; it is not the perf floor. Drop-rule should reference `phase0-baseline = 1m11.153s` as the floor, not the 49s.
+- **The committed `interpreter_mac_arm64` is a one-way bridge** built from `ac2e6f3`-era source that emitted D1/D2/D3 fast paths the current source can no longer reproduce. `verify.sh` check 5 currently validates determinism (same bootstrap → same output twice), NOT true fixed-point. Replacing the committed binary with a clean Phase-2 self-build is BLOCKED on a stage2-runtime IJ-tree-walker bug ("scalar-VarDecl regression"). See `IMPLEMENTATION_PLAN.md` P2.
+- **`(Value, bool)` was chosen over `tReturn` magic-tag** for the return-sentinel (Plan §Task 2.7 had it as measurement-conditional). Adds one `if ret { return v, true }` branch per recursive `eval` call. Plan §Task 2.7 should record this as the implemented choice; rolling back to `tReturn` is not on the table at this point.
+- **CPU profile hook is built in:** `IJ_CPUPROFILE=path ./interpreter_mac_arm64 < src/sample.s` writes a Go pprof CPU profile. Use this when measuring P2.5/P3/P4.
+
+The remainder of this document keeps the original phase definitions (P1 / P2 / P3 / P4) for reference; **P2.5 is the new section authored 2026-05-18** and lives between P2 and P3 below.
 
 ## Goal
 
@@ -35,12 +79,13 @@ Unchanged: IJ syntax/lexer/parser logic, driver scripts, MCP protocol, `test.s`,
 
 | Phase | Lever | Expected | Status |
 |---|---|---|---|
-| P1 | Tagged-union `Value` struct | 2–4× | Spec'd |
-| P2 | Typed AST struct nodes | 2–4× | Spec'd |
-| P3 | String interning + null/bool/small-int singletons | 1.3–1.8× | Spec'd |
+| P1 | Tagged-union `Value` struct | 2–4× | ✅ Shipped, but cleanup dropped D1/D2/D3 fast paths |
+| P2 | Typed AST struct nodes | 2–4× | ✅ Shipped structurally; resolver annotations LANDED but DEAD (no emitter reads them) |
+| **P2.5** | **Activate resolver annotations (D1 reborn) + skip dead Context allocs** | **2–3×** | **NEW (added 2026-05-18) — next priority after P2-fixed-point unblock** |
+| P3 | String interning + null/bool/small-int singletons | 1.3–1.8× | Demoted: smaller lever than P2.5 |
 | P4 (stretch) | Slot-indexed contexts | 1.5–2× | Conditional — only if P1–P3 < 10× |
 
-Multiplicative range if all four land: ~6–58×. Realistic 10–15×. Stop after first phase that crosses 10× cumulative.
+Multiplicative range if all five land: ~12–87×. Realistic 10–15× cumulative vs phase0. **HEAD measurement is 0.88× of phase0 — the bookkeeping target for P2.5 is to crawl back to ≥1.3× of phase0 first, then continue.** Stop after first phase that crosses 10× cumulative.
 
 ---
 
@@ -257,6 +302,185 @@ Resolver currently annotates MapValue AST with `"resolvedName"`, `"resolvedKind"
 
 ---
 
+## Phase 2.5 — Activate Resolver Annotations (added 2026-05-18)
+
+### Problem
+
+After P2 shipped structurally, the resolver pass (`resolveScopes` at `src/interpreter.s:1616`, plus `resolveBlockStatement` / `resolveFunctionDeclaration` / `resolveIdentifier` / `analyzeIsStatic`) annotates every AST MapValue node with:
+
+- `resolvedKind` ∈ {`"global"`, `"local"`, `"captured"`}
+- `resolvedOrigin` ∈ {`"param"`, `"let"`, `"def"`, `"lib"`, `null`}
+- `resolvedName` (mangled, Go-safe identifier from `mangle` at `src/interpreter.s:1243`)
+- `resolvedAtRoot` (true iff scope's parent is null)
+- `resolvedScope` / `resolvedLocals` / `resolvedParamLocals` (per-scope declaration metadata)
+- `resolvedIsStatic` (true iff the function body emits no `ctx.Get`/`Update`/`Create`)
+
+**No `*ToGo` emitter reads any of these.** Every `&Node{...}` literal is emitted with the raw user-source name, and `evalIdent` does `ctx.Get(n.name)` — chain-walk + Go-map probe — at runtime. For library globals like `puts`, `gets`, `len`, the walk goes all the way to root every time.
+
+The optimization infrastructure is present and paid for; only the projection + read sites are missing.
+
+### New shape (emitted Go)
+
+#### Resolver-projected fields on `Node`
+
+These already exist on the emitted `Node` struct (`src/interpreter.s:5174-5192`) — `resolvedKind uint8`, `resolvedSlot int32`, `resolvedName string`, `isStatic bool`. They are zero-valued today. P2.5 starts writing them.
+
+```go
+const (
+    rkGlobal  uint8 = 0  // top-level let / def / library
+    rkParam   uint8 = 1  // function parameter
+    rkLocal   uint8 = 2  // function-local let
+    rkUpvalue uint8 = 3  // captured from enclosing scope
+    rkLib     uint8 = 4  // root-context library function (puts/gets/...)
+)
+```
+
+`resolvedSlot int32` stays zero-valued at this phase (P4 populates it). `resolvedName` carries the Go-safe mangled name when the identifier is a function-decl reference targeted at a static-impl Go function (P2.5b — D2 reborn). `isStatic` (currently dead) repurposed as `Node.skipCtxLookup`: when the resolver proved the binding can be reached without a `ctx.Get` map probe, set `true`.
+
+#### Codegen: `identifierToGo` projects resolver annotations
+
+```ij
+def identifierToGo(self) {
+    print('&Node{kind: nkIdent, name: "' + self["name"] + '"');
+    if (self["resolvedKind"] != null) {
+        print(', resolvedKind: ' + resolverKindCode(self["resolvedKind"], self["resolvedOrigin"]));
+    }
+    print('}');
+}
+```
+
+`resolverKindCode(kind, origin)` is a new emitter helper that maps the IJ-side string-tagged annotation (`"global"`+`"lib"` ⇒ `rkLib`; `"local"`+`"param"` ⇒ `rkParam`; etc.) to the numeric `rk*` constant emitted at runtime.
+
+#### Runtime: `evalIdent` switches on `resolvedKind`
+
+```go
+func evalIdent(n *Node, ctx *Context) (Value, bool) {
+    switch n.resolvedKind {
+    case rkParam, rkLocal:
+        return ctx.GetLocal(n.name), false   // skip parent walk
+    case rkLib:
+        return rootCtx.GetLocal(n.name), false  // direct root lookup
+    case rkUpvalue:
+        return ctx.parent.GetLocal(n.name), false  // single-hop walk (depth=1)
+    }
+    return ctx.Get(n.name), false  // fallback: rkGlobal or unannotated
+}
+```
+
+`Context.GetLocal(name)` is a new method that probes only `c.variables[name]` without walking parents. `rootCtx` is a top-level `*Context` reference captured at program start; `programToGoPhase2` already creates `ctx := NewContext(nil)` once at `func main()` entry, so capturing it as a package-level `var rootCtx *Context` is a one-line emit change.
+
+#### `evalAssign` short-circuits on annotation
+
+```go
+func evalAssign(n *Node, ctx *Context) (Value, bool) {
+    v, ret := eval(n.right, ctx); if ret { return v, true }
+    switch n.resolvedKind {
+    case rkLocal, rkParam:
+        ctx.UpdateLocal(n.name, v)  // no Exists chain walk
+        return v, false
+    case rkGlobal:
+        rootCtx.UpdateLocal(n.name, v)
+        return v, false
+    }
+    if ctx.Exists(n.name) { ctx.Update(n.name, v) } else { ctx.Create(n.name, v) }
+    return v, false
+}
+```
+
+(One `if ctx.Exists` chain walk + one `ctx.Update` chain walk replaced with one direct map probe. Catches the `evalAssign` "two-walks-per-write" cost from the research §2.2.)
+
+#### `evalBlock` skips Context allocation when no `let`
+
+The resolver already computes `resolvedLocals` per block scope. Project that as `Node.list` is unchanged but **add `Node.hasLocals bool`** (one new field) — set by `blockStatementToGo` only when the resolver tagged the block as introducing at least one binding.
+
+```go
+func evalBlock(n *Node, ctx *Context) (Value, bool) {
+    blockCtx := ctx
+    if n.hasLocals {
+        blockCtx = NewContext(ctx)
+    }
+    var last Value
+    for _, s := range n.list {
+        v, ret := eval(s, blockCtx)
+        if ret { return v, true }
+        last = v
+    }
+    return last, false
+}
+```
+
+This eliminates the per-iteration Context alloc inside `while` loops whose body has no `let` (the `sample.s` shape).
+
+#### `evalCall` skips the wasted `FunctionCommand.Execute` ctx alloc
+
+`FunctionCommand.Execute` (`src/interpreter.s:5119-5121`) creates a `NewContext(c.definitionCtx)` that the closure body then immediately ignores. Drop that alloc:
+
+```go
+func (c *FunctionCommand) Execute(callerCtx *Context, params *ArrayValue) Value {
+    return c.executeFunc(nil, params)  // closure body allocates its own
+}
+```
+
+The closure body still does `local := NewContext(defCtx)` — which is fine; that is the function's actual local scope. Net: 1 fewer `*Context` alloc per function call.
+
+#### `NewStaticFunctionCommand` becomes the path for `resolvedIsStatic == true` defs
+
+Today `NewStaticFunctionCommand` is a name-only alias for `NewFunctionCommand` (`src/interpreter.s:5128-5130`). Wire `functionDeclarationToGo` to emit `NewStaticFunctionCommand(...)` when `node["resolvedIsStatic"] == true`, and inside `NewStaticFunctionCommand` skip the per-call `NewContext` alloc by re-using a fenced reusable context (the static-impl path: function body emits no `ctx.Get`/`Update`/`Create`, so a re-used ctx is safe). This is the half-step toward D2 — a static def gets called with zero `*Context` allocations on the function-call hot path.
+
+(D2 full reborn — emitting `ij_<name>_impl(ctx, a, b)` fixed-arity Go functions and direct call-site dispatch — is the natural follow-up but is NOT in P2.5 scope. P2.5 ships only the resolver wiring + the cheap static-ctx win. D2 reborn is a separate post-P2.5 task if measurement still falls short.)
+
+### Codegen edit sites
+
+| Emitter | Edit |
+|---|---|
+| `identifierToGo` (`src/interpreter.s:1922`) | project `resolvedKind` / `resolvedOrigin` into `&Node{kind: nkIdent, ...}` |
+| `assignmentStatementToGo` (`735`) | project `resolvedKind` of the LHS |
+| `variableDeclarationToGo` (`4336`) | project `resolvedKind` of the binding |
+| `functionDeclarationToGo` (`1693`) | emit `NewStaticFunctionCommand` when `resolvedIsStatic == true`; project `resolvedAtRoot` so `evalFuncDecl` can register at root |
+| `blockStatementToGo` (`1100`) | emit `hasLocals: true` only when `resolvedLocals` non-empty |
+
+### Runtime emit edits
+
+| Block | Edit |
+|---|---|
+| `Node` struct (`5174-5192`) | add `hasLocals bool`; keep `resolvedKind`/`resolvedSlot`/`resolvedName`/`isStatic` (currently dead) |
+| `eval` dispatch (`5194-5220`) | unchanged — switch on `n.kind` still |
+| `evalIdent` (`5221-5223`) | switch on `n.resolvedKind` |
+| `evalAssign` (`5258-5263`) | switch on `n.resolvedKind` |
+| `evalBlock` (`5275-5285`) | gate `NewContext` on `n.hasLocals` |
+| `evalFuncDecl` (`5327-5339`) | add `rootCtx` capture path for top-level decls |
+| `Context` (`5078-5106`) | add `GetLocal` / `UpdateLocal` (single-level) methods |
+| `FunctionCommand.Execute` (`5119-5121`) | drop the `NewContext(c.definitionCtx)` alloc |
+| `goLibPrefix` preamble | add `var rootCtx *Context` declaration; `programToGoPhase2` assigns it after `ctx := NewContext(nil)` |
+
+### Risks
+
+- **Deletes `evalAssign` "shadowing" semantics.** Today's `evalAssign` (`5258-5263`) creates a local binding on assignment if the name doesn't exist anywhere on the chain — IJ's idiom for "assignment-also-declares". The resolver knows whether the LHS was previously declared at any scope; for unannotated nodes we keep the old fallback. Any node where the resolver did NOT annotate must continue to fall through to the chain-walk fallback. Verify with `test.s`.
+- **Override pattern preservation.** `let oldX = X; def X(...) { oldX(...) }` works today because `ctx.Update` walks parents. P2.5 keeps that path on the unannotated fallback; the resolver will mark the rebound `X` with `resolvedKind=rkGlobal` and route through `rootCtx.UpdateLocal`. Verify `verify.sh` check 4 (MCP, which depends on the override pattern) at every P2.5 commit.
+- **`rootCtx` global is mutable from any goroutine.** The interpreter is single-threaded; not a real concern but warrants a comment in the emit.
+- **`hasLocals` determinism.** `blockStatementToGo` reads `node["resolvedLocals"]`, written deterministically by the resolver in source order. Should be deterministic; verify with `verify.sh` check 5.
+- **`NewStaticFunctionCommand` re-used ctx aliasing.** The static-impl invariant is "no `ctx.Create` / `ctx.Update`" inside the body — but the body STILL has params, which are bound at call time. Re-using a single ctx across nested calls breaks recursion. Two options: (a) keep `NewContext` per call but skip the inner block's redundant ctx (cheap; covered by `hasLocals`); (b) defer the static-ctx pooling to a follow-up. **Pick (a) for P2.5.** The dead `NewStaticFunctionCommand` alias is renamed but stays semantically identical; the actual win is the `evalBlock` `hasLocals` gate.
+
+### Exit criteria
+
+- Resolver annotations are projected into Node by `identifierToGo`, `assignmentStatementToGo`, `variableDeclarationToGo`, `functionDeclarationToGo`, `blockStatementToGo`.
+- `evalIdent`, `evalAssign`, `evalBlock` switch on annotations and skip chain walks / context allocs in the fast path.
+- `./scripts/test.sh` passes.
+- `./scripts/verify.sh` checks 1–4 green; check 5 re-baselined and bit-identical at phase end.
+- `./scripts/bench.sh phase2_5-resolver-wired` ≥ 1.5× over `p2-no-refresh = 1m20.478s` (target 2–3× given the per-eval frequency of `evalIdent`/`evalBlock`).
+- Cumulative speedup vs `phase0-baseline = 1m11.153s` ≥ 1.3×. (Today's HEAD is 0.88× — the cleanup-induced regression is forgiven only by net post-cleanup gain; P2.5 must crawl back over 1.3× cumulative or it's not a phase, just churn.)
+
+### Out of scope for P2.5
+
+- D2 full reborn (emitting `ij_<name>_impl` fixed-arity Go functions + direct call-site dispatch).
+- D3 reborn (raw-bool `EqualsBool`/`LessThanBool` helpers wired into `evalIf`/`evalWhile`).
+- Slot-indexed contexts (Phase 4 territory).
+- String interning (Phase 3 territory).
+
+If P2.5 hits ≥10× cumulative, **stop and ship.** Otherwise continue to P3 (interning) → P4 (slot-indexed contexts) per original ordering.
+
+---
+
 ## Phase 3 — String Interning + Constant Singletons
 
 ### Problem
@@ -425,7 +649,9 @@ Native check (`scripts/native_interpreter.sh src/sample.s`) tracked as regressio
 
 ### Bench labels
 
-`phase0-baseline`, `phase1-tagged-value`, `phase2-typed-ast`, `phase3-intern`, `phase4-slots`.
+`phase0-baseline`, `phase1-tagged-value`, `phase2-typed-ast`, `phase2_5-resolver-wired`, `phase3-intern`, `phase4-slots`.
+
+(`p1-dead-code-cleanup`, `p2-no-refresh` are intra-phase remediation labels written 2026-05-17. Treat `p2-no-refresh = 1m20.478s` as the P2.5 entry floor.)
 
 ---
 

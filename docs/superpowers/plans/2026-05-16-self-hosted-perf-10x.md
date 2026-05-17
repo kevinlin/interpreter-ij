@@ -4,11 +4,29 @@
 
 **Goal:** Make `./scripts/bench.sh` self-hosted run at least 10× faster (≤ 7s wall on macOS/arm64), without breaking the self-bootstrap fixed-point or any functional check.
 
-**Architecture:** Phased refactor of the emitted Go runtime + the codegen inside `interpreter.s`. P1 swaps the `Value` interface for a tagged-union struct. P2 replaces MapValue-backed AST nodes with typed Go structs in the transpiled output. P3 adds a global string pool + null/bool/small-int singletons. P4 (conditional) replaces map-backed Contexts with slot-indexed slices.
+**Architecture:** Phased refactor of the emitted Go runtime + the codegen inside `interpreter.s`. P1 swaps the `Value` interface for a tagged-union struct. P2 replaces MapValue-backed AST nodes with typed Go structs in the transpiled output. **P2.5 activates the resolver annotations that P2 wires structurally but never reads.** P3 adds a global string pool + null/bool/small-int singletons. P4 (conditional) replaces map-backed Contexts with slot-indexed slices.
 
 **Tech Stack:** IJ (self-hosted), Go (transpile target), bash drivers, golden-output regression harness.
 
 **Design source:** [docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md](../specs/2026-05-16-self-hosted-perf-10x-design.md)
+**Research source (current state map):** [docs/superpowers/research/2026-05-18-interpreter-perf-research.md](../research/2026-05-18-interpreter-perf-research.md)
+
+---
+
+## Status — 2026-05-18 (revised)
+
+| Phase | Status | Bench at end of phase |
+|---|---|---|
+| Phase 0 — Baseline | ✅ shipped 2026-05-16 | `phase0-baseline = 1m11.153s` |
+| Phase 1 — Tagged-union `Value` | ✅ shipped (committed binary on bridge — see P2 in IMPLEMENTATION_PLAN.md) | (folded into P2; cleanup dropped D1/D2/D3 fast paths) |
+| Phase 2 — Typed AST | ⚠️ shipped STRUCTURALLY only — resolver annotations land on AST but are never read by `*ToGo` emitters; 6 Node fields are dead weight | `p2-no-refresh = 1m20.478s (0.88× of phase0)` |
+| **Phase 2.5 — Activate resolver annotations** | ⬜ **NEW (this revision) — next priority once stage2 self-build unblocks** | target ≥ 1.5× of `p2-no-refresh` (~53s) |
+| Phase 3 — String interning + singletons | ⬜ demoted (smaller lever than P2.5) | — |
+| Phase 4 — Slot-indexed contexts | ⬜ stretch | — |
+
+The reality vs the original spec is captured in `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md` "Status Update — 2026-05-18". The research doc enumerates every dead optimization site by line number.
+
+**Drop-rule reminder:** the floor for P2.5's drop rule is `p2-no-refresh = 1m20.478s`, not `phase0-baseline = 1m11.153s` and NOT the irreproducible 49s outlier. P2.5 must show ≥1.3× of `p2-no-refresh` or it is reverted. After P2.5 passes the per-phase drop rule, the cumulative-vs-phase0 target stays at ≥10× (= ≤ 7.115s).
 
 ---
 
@@ -1507,6 +1525,447 @@ git commit -m "bench: phase2-typed-ast results"
 
 ---
 
+## Phase 2.5 — Activate Resolver Annotations (added 2026-05-18)
+
+**Why this phase exists:** Phase 2 shipped the `Node` struct and the `eval(n *Node, ctx *Context) (Value, bool)` switch — but the resolver pass (`resolveScopes` at `src/interpreter.s:1616`) annotates every AST MapValue node with `resolvedKind`, `resolvedOrigin`, `resolvedName`, `resolvedAtRoot`, `resolvedScope`, `resolvedLocals`, `resolvedParamLocals`, `resolvedIsStatic` — and **NO `*ToGo` emitter reads any of them.** The result is `evalIdent → ctx.Get(n.name)` with full chain-walk + Go-map probe per identifier reference, including for library globals like `puts`/`gets`/`len` that walk to root every time. P2.5 wires the dead infrastructure: project annotations into `Node` at emit time, switch on them at runtime.
+
+**Spec:** `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md` §"Phase 2.5 — Activate Resolver Annotations".
+**Research evidence:** `docs/superpowers/research/2026-05-18-interpreter-perf-research.md` §3.2 (all resolver annotations dead) + §3.1 (six dead `Node` fields) + §2.2 (`Context.Get` chain-walk cost) + §2.4 (`evalBlock` always allocs).
+
+**Pre-flight blocker (handle before starting Phase 2.5):** the stage2 IJ-tree-walker has a scalar-VarDecl regression (any top-level `let x = scalar` aborts evaluation). Until that is fixed, replacing the committed bootstrap binary with a clean Phase-2 self-build breaks `verify.sh` checks 1–3. P2.5 edits `interpreter.s` only and runs `compile-local.sh` against the existing bootstrap, so this blocker DOES NOT prevent P2.5 work — but the committed binary cannot be replaced until the regression lands. See IMPLEMENTATION_PLAN.md P2.
+
+### Task 2.5.1: Add `rkGlobal/rkParam/rkLocal/rkUpvalue/rkLib` constants + `hasLocals` field to runtime emit
+
+**Files:**
+- Modify: `src/interpreter.s` — runtime emit block, after the `nk*` and `op*` constant emits.
+
+- [ ] **Step 1: Locate insertion point**
+
+Run: `grep -n 'puts("op[NA]' src/interpreter.s | head` and find the line just after the last `op*` constant emit.
+
+- [ ] **Step 2: Insert `rk*` constant block**
+
+```ij
+puts("const (");
+puts("rkGlobal uint8 = iota");
+puts("rkParam");
+puts("rkLocal");
+puts("rkUpvalue");
+puts("rkLib");
+puts(")");
+```
+
+- [ ] **Step 3: Add `hasLocals bool` to Node struct emit**
+
+Locate the `puts("type Node struct {")` block at `src/interpreter.s:5174-5192`. Insert `puts("hasLocals bool")` just before the closing `puts("}")`. Keep the existing `resolvedKind uint8`, `resolvedSlot int32`, `resolvedName string`, `isStatic bool` fields — they are repurposed in the next tasks, not removed.
+
+- [ ] **Step 4: Add `var rootCtx *Context` declaration in `goLibPrefix`**
+
+Just after the `Context` type emit block, add: `puts("var rootCtx *Context")`.
+
+- [ ] **Step 5: Add `Context.GetLocal` / `Context.UpdateLocal` methods**
+
+After the existing `Context.Get` / `Context.Update` emit, add:
+
+```ij
+puts("func (c *Context) GetLocal(name string) Value {");
+puts("if v, ok := c.variables[name]; ok { return v }");
+puts("return vInvalid(" + chr(34) + "variable not found: " + chr(34) + " + name)");
+puts("}");
+puts("func (c *Context) UpdateLocal(name string, v Value) Value {");
+puts("if c.variables == nil { c.variables = make(map[string]Value) }");
+puts("c.variables[name] = v");
+puts("return v");
+puts("}");
+```
+
+- [ ] **Step 6: Build + functional check**
+
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t1 && ./scripts/test.sh`
+Expected: build succeeds; tests pass (no behavioral change yet — new fields/methods are added but unused).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/interpreter.s
+git commit -m "perf/p2.5: scaffold rk* constants, hasLocals field, GetLocal/UpdateLocal helpers"
+```
+
+---
+
+### Task 2.5.2: Add `resolverKindCode(kind, origin)` codegen helper
+
+**Files:**
+- Modify: `src/interpreter.s` — IJ-side, near the resolver helpers (`mangle` is at `1243`; place this helper just below it).
+
+- [ ] **Step 1: Insert `resolverKindCode` helper**
+
+```ij
+def resolverKindCode(kind, origin) {
+    if (kind == "global") {
+        if (origin == "lib") { return "rkLib"; }
+        return "rkGlobal";
+    }
+    if (kind == "local") {
+        if (origin == "param") { return "rkParam"; }
+        return "rkLocal";
+    }
+    if (kind == "captured") { return "rkUpvalue"; }
+    return "rkGlobal";
+}
+```
+
+- [ ] **Step 2: Build + commit**
+
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t2 && ./scripts/test.sh`
+Expected: pass.
+
+```bash
+git add src/interpreter.s
+git commit -m "perf/p2.5: add resolverKindCode helper"
+```
+
+---
+
+### Task 2.5.3: Project resolver annotations from `identifierToGo`
+
+**Files:**
+- Modify: `src/interpreter.s:1922` — `identifierToGo`.
+
+- [ ] **Step 1: Update `identifierToGo` to emit `resolvedKind`**
+
+Replace:
+
+```ij
+def identifierToGo(self) {
+    print('&Node{kind: nkIdent, name: "');
+    print(self["name"]);
+    print('"}');
+}
+```
+
+with:
+
+```ij
+def identifierToGo(self) {
+    print('&Node{kind: nkIdent, name: "');
+    print(self["name"]);
+    print('"');
+    if (self["resolvedKind"] != null) {
+        print(", resolvedKind: ");
+        print(resolverKindCode(self["resolvedKind"], self["resolvedOrigin"]));
+    }
+    print('}');
+}
+```
+
+- [ ] **Step 2: Build, test, verify check 5 determinism**
+
+Run:
+```bash
+./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t3a
+./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t3b
+diff /tmp/ij_p2_5_t3a /tmp/ij_p2_5_t3b && echo OK
+./scripts/test.sh
+```
+Expected: `OK`; tests pass. Annotations are now emitted but `evalIdent` still uses the chain-walk fallback — no behavioral change.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/interpreter.s
+git commit -m "perf/p2.5: project resolvedKind/resolvedOrigin from identifierToGo"
+```
+
+---
+
+### Task 2.5.4: Switch `evalIdent` to dispatch on `resolvedKind`
+
+**Files:**
+- Modify: `src/interpreter.s:5221-5223` — `evalIdent` runtime emit.
+
+- [ ] **Step 1: Replace `evalIdent` body**
+
+Replace:
+
+```ij
+puts("func evalIdent(n *Node, ctx *Context) (Value, bool) {");
+puts("return ctx.Get(n.name), false");
+puts("}");
+```
+
+with:
+
+```ij
+puts("func evalIdent(n *Node, ctx *Context) (Value, bool) {");
+puts("switch n.resolvedKind {");
+puts("case rkParam, rkLocal: return ctx.GetLocal(n.name), false");
+puts("case rkLib: return rootCtx.GetLocal(n.name), false");
+puts("case rkUpvalue: if ctx.parent != nil { return ctx.parent.GetLocal(n.name), false }");
+puts("}");
+puts("return ctx.Get(n.name), false");
+puts("}");
+```
+
+- [ ] **Step 2: Update `programToGoPhase2` to capture `rootCtx`**
+
+In `src/interpreter.s:5390-5431` (`programToGoPhase2`), inside the emitted `func main()`, immediately after `ctx := NewContext(nil)` add `puts("rootCtx = ctx")`.
+
+- [ ] **Step 3: Build, test, verify**
+
+Run:
+```bash
+./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t4
+./scripts/test.sh
+./scripts/verify.sh
+```
+Expected: tests + checks 1–4 pass. Check 5 may fail (different fingerprint) — re-baseline at phase end.
+
+If a `vInvalid("variable not found: ...")` surfaces on a previously-working binding, the resolver mis-classified that identifier. Fall back to the chain-walk by clearing `n.resolvedKind` for that emit site (or fix the resolver — preferred). Common surfaces: identifiers introduced by `let` inside an `if` branch (resolver may classify them differently than the `if`-block scope).
+
+- [ ] **Step 4: Bench (mid-phase peek)**
+
+Run: `time ( echo hi | ./scripts/selfhosted_interpreter.sh src/sample.s >/dev/null )`
+Expected: should be ≥1.3× faster than `p2-no-refresh = 1m20.478s` already, since `evalIdent` is one of the highest-frequency hot-path ops.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/interpreter.s
+git commit -m "perf/p2.5: evalIdent switches on resolvedKind, skips chain walk for rkParam/rkLocal/rkLib/rkUpvalue"
+```
+
+---
+
+### Task 2.5.5: Project resolver annotations from assignment / var-decl emitters
+
+**Files:**
+- Modify: `src/interpreter.s:735` — `assignmentStatementToGo`.
+- Modify: `src/interpreter.s:4336` — `variableDeclarationToGo`.
+
+- [ ] **Step 1: Update `assignmentStatementToGo`**
+
+Locate the `&Node{kind: nkAssign, name: "<raw>", right: ...}` emit. Add a `resolvedKind` field after `name`:
+
+```ij
+print(', name: "' + self["name"] + '"');
+if (self["resolvedKind"] != null) {
+    print(", resolvedKind: ");
+    print(resolverKindCode(self["resolvedKind"], self["resolvedOrigin"]));
+}
+print(', right: ');
+```
+
+- [ ] **Step 2: Update `variableDeclarationToGo` similarly**
+
+Same pattern: if the decl carries `resolvedKind` / `resolvedOrigin`, emit them on the `&Node{kind: nkVarDecl, ...}` literal.
+
+- [ ] **Step 3: Update `evalAssign` to short-circuit on `resolvedKind`**
+
+In runtime emit (`5258-5263`), replace:
+
+```ij
+puts("func evalAssign(n *Node, ctx *Context) (Value, bool) {");
+puts("v, ret := eval(n.right, ctx)");
+puts("if ret { return v, true }");
+puts("if ctx.Exists(n.name) { ctx.Update(n.name, v) } else { ctx.Create(n.name, v) }");
+puts("return v, false");
+puts("}");
+```
+
+with:
+
+```ij
+puts("func evalAssign(n *Node, ctx *Context) (Value, bool) {");
+puts("v, ret := eval(n.right, ctx)");
+puts("if ret { return v, true }");
+puts("switch n.resolvedKind {");
+puts("case rkParam, rkLocal:");
+puts("ctx.UpdateLocal(n.name, v)");
+puts("return v, false");
+puts("case rkGlobal:");
+puts("rootCtx.UpdateLocal(n.name, v)");
+puts("return v, false");
+puts("}");
+puts("if ctx.Exists(n.name) { ctx.Update(n.name, v) } else { ctx.Create(n.name, v) }");
+puts("return v, false");
+puts("}");
+```
+
+- [ ] **Step 4: `evalVarDecl` similarly**
+
+In runtime emit (`5286-5294`), `evalVarDecl` already calls `ctx.Create(n.name, v)` which lazily allocates the local map. The fast-path equivalent is `ctx.UpdateLocal(n.name, v)` — same effect. Replace `ctx.Create` with `ctx.UpdateLocal` for `rkLocal` / `rkParam`. Keep `rkGlobal` routing to `rootCtx.UpdateLocal`.
+
+- [ ] **Step 5: Build, test, verify**
+
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t5 && ./scripts/test.sh && ./scripts/verify.sh`
+Expected: tests + checks 1–4 pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/interpreter.s
+git commit -m "perf/p2.5: evalAssign/evalVarDecl short-circuit on resolvedKind"
+```
+
+---
+
+### Task 2.5.6: Gate `evalBlock` Context allocation on `hasLocals`
+
+**Files:**
+- Modify: `src/interpreter.s:1100` — `blockStatementToGo`.
+- Modify: `src/interpreter.s:5275-5285` — `evalBlock` runtime emit.
+
+- [ ] **Step 1: Update `blockStatementToGo` to project `hasLocals`**
+
+Inside the `&Node{kind: nkBlock, list: []*Node{...}}` emit, also emit `hasLocals: true` if and only if the resolver tagged this block as introducing at least one binding. The IJ-side resolver writes `resolvedLocals` on the block scope (`resolveBlockStatement` at `src/interpreter.s:1346`); read it:
+
+```ij
+let locals = self["resolvedLocals"];
+if (locals != null) {
+    if (len(locals) > 0) {
+        print(", hasLocals: true");
+    }
+}
+```
+
+- [ ] **Step 2: Update `evalBlock` to gate `NewContext`**
+
+Replace:
+
+```ij
+puts("func evalBlock(n *Node, ctx *Context) (Value, bool) {");
+puts("blockCtx := NewContext(ctx)");
+puts("var last Value");
+puts("last = vNull()");
+puts("for _, s := range n.list {");
+puts("v, ret := eval(s, blockCtx)");
+puts("if ret { return v, true }");
+puts("last = v");
+puts("}");
+puts("return last, false");
+puts("}");
+```
+
+with:
+
+```ij
+puts("func evalBlock(n *Node, ctx *Context) (Value, bool) {");
+puts("blockCtx := ctx");
+puts("if n.hasLocals { blockCtx = NewContext(ctx) }");
+puts("var last Value");
+puts("last = vNull()");
+puts("for _, s := range n.list {");
+puts("v, ret := eval(s, blockCtx)");
+puts("if ret { return v, true }");
+puts("last = v");
+puts("}");
+puts("return last, false");
+puts("}");
+```
+
+- [ ] **Step 3: Build, test, verify**
+
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t6 && ./scripts/test.sh && ./scripts/verify.sh`
+Expected: pass. The big test surface here is `while`-loop bodies with no `let` (the `sample.s` loop) — they should now skip the per-iteration Context alloc.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/interpreter.s
+git commit -m "perf/p2.5: evalBlock skips NewContext when hasLocals=false"
+```
+
+---
+
+### Task 2.5.7: Drop the wasted `FunctionCommand.Execute` Context allocation
+
+**Files:**
+- Modify: `src/interpreter.s:5119-5121` — `FunctionCommand.Execute` runtime emit.
+
+- [ ] **Step 1: Replace `Execute` body**
+
+Replace:
+
+```ij
+puts("func (c *FunctionCommand) Execute(callerCtx *Context, params *ArrayValue) Value {");
+puts("return c.executeFunc(NewContext(c.definitionCtx), params)");
+puts("}");
+```
+
+with:
+
+```ij
+puts("func (c *FunctionCommand) Execute(callerCtx *Context, params *ArrayValue) Value {");
+puts("return c.executeFunc(nil, params)");
+puts("}");
+```
+
+The closure body already does `local := NewContext(defCtx)` as its first line (`evalFuncDecl` emit at `5331`), discarding whatever `callerCtx` was passed. Passing `nil` makes the discarded alloc explicit and saves one `*Context` per function call.
+
+- [ ] **Step 2: Build, test, verify**
+
+Run: `./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_t7 && ./scripts/test.sh && ./scripts/verify.sh`
+Expected: pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/interpreter.s
+git commit -m "perf/p2.5: drop wasted FunctionCommand.Execute caller-ctx alloc"
+```
+
+---
+
+### Task 2.5.8: Re-baseline check 5 + benchmark Phase 2.5
+
+**Files:**
+- Modify: `interpreter_mac_arm64`, `mcp_mac_arm64`, `bench.log`.
+
+**Pre-flight check:** if the stage2 IJ-tree-walker scalar-VarDecl regression is NOT yet fixed, **DO NOT replace the committed binary** (per AGENTS.md). Run the bench against the existing committed bootstrap + the source-level changes (every `*ToGo` emitter is exercised via `compile-local.sh src/interpreter.s` which builds against the bootstrap and then runs the resulting binary). The bench number is honest in that case; only the committed-binary-replace step is gated.
+
+- [ ] **Step 1: Demonstrate fixed-point at source level**
+
+Run:
+```bash
+./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_stage1
+./src/compile-local.sh src/interpreter.s /tmp/ij_p2_5_stage2
+diff /tmp/ij_p2_5_stage1 /tmp/ij_p2_5_stage2 && echo OK
+```
+Expected: `OK`. If diff non-empty, find the non-determinism (likely a map-iteration order in the new resolver-projection paths).
+
+- [ ] **Step 2: Replace committed binary IF stage2 regression is fixed**
+
+If IMPLEMENTATION_PLAN.md P2 stage2-regression item is closed:
+
+```bash
+./src/compile-local.sh src/interpreter.s interpreter_mac_arm64
+./scripts/build.sh   # rebuilds MCP via mcp_eval.s
+```
+Expected: binary at repo root + `mcp_mac_arm64` updated. `verify.sh` 5/5 PASS.
+
+If the regression is not fixed: skip this step. The committed bootstrap stays as-is; your source changes are still benched correctly via `compile-local.sh`.
+
+- [ ] **Step 3: Bench**
+
+Run: `./scripts/bench.sh phase2_5-resolver-wired`
+Expected: timing block appended. Compute speedup vs `p2-no-refresh = 1m20.478s`.
+
+- [ ] **Step 4: Drop-rule check**
+
+Speedup ≥ 1.3× vs `p2-no-refresh` ⇒ keep. If not, the resolver wiring did not pay off — investigate (CPU profile via `IJ_CPUPROFILE=/tmp/p.out ./interpreter_mac_arm64 < src/sample.s`, then `go tool pprof /tmp/p.out`). If still unsalvageable, revert P2.5 commits (keeping the constants + helper field declarations is fine; revert only the eval-dispatch + emitter changes that introduce overhead).
+
+If cumulative speedup vs `phase0-baseline = 1m11.153s` ≥ 10× (i.e. wall ≤ 7.115s): **stop, ship**, skip P3 + P4 entirely, jump to "Phase Done — Cleanup".
+
+- [ ] **Step 5: Commit bench**
+
+```bash
+git add bench.log
+git commit -m "bench: phase2_5-resolver-wired results"
+```
+
+---
+
 ## Phase 3 — String Interning + Constant Singletons
 
 Cumulative speedup not yet ≥10× — add interning. Otherwise skip to "Phase Done — Cleanup".
@@ -1892,12 +2351,13 @@ Run through the plan once with fresh eyes before handing off.
 **Spec coverage:**
 - ✅ Tagged-union Value (design §Phase 1) → Plan §Phase 1, tasks 1.1–1.8.
 - ✅ Typed AST struct nodes (design §Phase 2) → Plan §Phase 2, tasks 2.1–2.9.
+- ✅ Activate resolver annotations (design §Phase 2.5, added 2026-05-18) → Plan §Phase 2.5, tasks 2.5.1–2.5.8.
 - ✅ String interning + singletons (design §Phase 3) → Plan §Phase 3, tasks 3.1–3.3.
 - ✅ Slot-indexed contexts (design §Phase 4) → Plan §Phase 4, tasks 4.1–4.3.
 - ✅ Primary benchmark (selfhosted_interpreter.sh sample.s) → exercised in every bench task.
-- ✅ Secondary benchmark (src/bench_eval.s) → created in Task 0.2, wired into scripts/bench.sh.
-- ✅ Per-phase exit criteria (≥1.3× drop-rule) → enforced in every "Benchmark Phase N" task.
-- ✅ Check 5 may break mid-phase, re-baselined at phase end → enforced in Tasks 1.7, 2.8, 3.2, 4.2.
+- ⚠️ Secondary benchmark (src/bench_eval.s) → was created in Task 0.2, but DROPPED from `scripts/bench.sh` (>5min under Phase 2 codegen). Re-enable only after primary bench hits 10×. Recorded in IMPLEMENTATION_PLAN.md P0.
+- ✅ Per-phase exit criteria (≥1.3× drop-rule) → enforced in every "Benchmark Phase N" task. **Floor for P2.5 = `p2-no-refresh` = 1m20.478s, NOT the irreproducible 49s outlier.**
+- ✅ Check 5 may break mid-phase, re-baselined at phase end → enforced in Tasks 1.7, 2.8, 2.5.8, 3.2, 4.2.
 - ✅ Use compile-local.sh not Docker → every build step uses compile-local.sh.
 
 **Placeholder scan:**
