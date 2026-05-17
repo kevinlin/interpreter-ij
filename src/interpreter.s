@@ -4500,7 +4500,7 @@ puts("return vInvalid(" + chr(34) + "push: expected array" + chr(34) + ")");
 puts("}");
 puts("ele := params.Get(Value{tag: tInt, i: 1})");
 puts("arr.arr.values = append(arr.arr.values, ele)");
-puts("return ele");
+puts("return arr");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "pop" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("arr := params.Get(Value{tag: tInt, i: 0})");

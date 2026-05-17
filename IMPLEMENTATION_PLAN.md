@@ -84,6 +84,7 @@ Status: **Partial. Node tree codegen active. *ToGo emitters rewritten to emit `&
 - [x] `opCodeFor` helper in interpreter.s
 - [x] `refreshToGoPointers` converted to iterative (fixes stack overflow)
 - [x] fb2b299 binary used as transpiler bridge (committed binary at dba0ddc has stack overflow, pre-cleanup binary at fb2b299 works)
+- [x] Push function bug fixed: `return ele` → `return arr` in goLibPrefix
 
 ### Completed: Node tree *ToGo codegen
 
@@ -114,7 +115,12 @@ All 21 `*ToGo` emitters rewritten to emit `&Node{...}` struct literals:
 - [x] Simple programs compile and run correctly with Phase 2 codegen
 
 **Known issue:**
-- [ ] Full self-hosted transpile of interpreter.s produces truncated output (goLibPrefix runs, programToGoPhase2 doesn't emit) — needs debugging
+- [ ] Push function in goLibPrefix returns `ele` instead of `arr`, breaking `refreshToGoPointers` iterative stack management. Fixed: `return ele` → `return arr` in `src/interpreter.s` goLibPrefix emission.
+- [ ] With push fix, `refreshToGoPointers` correctly rebinds toGo methods to Phase 2 Node tree emitters.
+- [ ] Binary A (built from committed binary) produces correct Node tree codegen in genB (verified: programNode in main, eval(programNode in main)).
+- [ ] Binary B (built from Binary A with push fix) compiles but has Node tree eval bugs: `let`, `while`, `while`, map literal all produce no output. Simple expressions like `puts(1+2)`, array literals, and if statements work.
+- [ ] Root cause of Binary B eval bugs needs deeper investigation in the goLibPrefix-emitted eval functions.
+- [ ] The committed binary must be rebuilt to propagate the push fix (the compiled-in push still returns `ele`).
 
 ### fix_app_go.py updates
 
