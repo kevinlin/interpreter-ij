@@ -68,9 +68,8 @@ def arrayLiteralToJson(self) {
 }
 
 def arrayLiteralToGo(self) {
-    // Go: NewArrayValue(StringValue{val: "x-"})
-    
-    print('NewArrayValue(');
+    // Phase 2: emit Node tree; evalArrayLit handles construction
+    print('&Node{kind: nkArrayLit, list: []*Node{');
 
     let elems = self["elements"];
     let n = len(elems);
@@ -79,16 +78,14 @@ def arrayLiteralToGo(self) {
         if (i > 0) {
             print(',');
         }
-        
         let element = elems[i];
         if (element["toGo"] != null) {
             element["toGo"](element);
         }
-
-        i = i + 1
+        i = i + 1;
     }
 
-    print(')');
+    print('}}');
 }
 
 // Helper: join array of strings with ", "
@@ -489,19 +486,16 @@ def makeIndexExpression(collectionNode, indexNode, position) {
     node["toJson"] = toJson;
 
     def toGo(self) {
-        // Go: params.Get(IntValue{val: 0})
-
+        // Phase 2: emit Node tree; evalIndex handles Get
+        print('&Node{kind: nkIndex, left: ');
         if (self["collection"]["toGo"] != null) {
-            self["collection"]["toGo"](self["collection"])
+            self["collection"]["toGo"](self["collection"]);
         }
-
-        print('.Get(');
-
+        print(', right: ');
         if (node["index"]["toGo"] != null) {
-            node["index"]["toGo"](node["index"])
+            node["index"]["toGo"](node["index"]);
         }
-
-        print(')');
+        print('}');
     }
     node["toGo"] = toGo;
 
@@ -595,15 +589,15 @@ def ReturnStatement_toJson(self) {
 }
 
 def ReturnStatement_toGo(self) {
-    // Go: return 1
-    puts("");
-    print("return ");
-
+    // Phase 2: emit Node tree; evalReturn handles propagation
+    print('&Node{kind: nkReturn');
     if (self["value"] != null) {
+        print(', right: ');
         if (self["value"]["toGo"] != null) {
             self["value"]["toGo"](self["value"]);
         }
     }
+    print('}');
 }
 
 
@@ -663,17 +657,14 @@ def ReturnStatement_toGo(self) {
     node["toJson"] = toJson;
 
     def toGo(self) {
-      // Go: for i < 3 { .. }
-
-      print('for ');
-
+      // Phase 2: emit Node tree; evalWhile handles looping
+      print('&Node{kind: nkWhileStmt, left: ');
       conditionToGoBool(self["condition"]);
-
-      print(' ');
-
+      print(', body: ');
       if (self["body"]["toGo"] != null) {
         self["body"]["toGo"](self["body"]);
       }
+      print('}');
     }
     node["toGo"] = toGo;
 
@@ -742,43 +733,12 @@ def assignmentStatementToJson(self) {
 }
 
 def assignmentStatementToGo(self) {
-    // Go: ctx.Update("i", IntValue{val: i})
-
-    // Static resolution: params (C3), function-local lets (C4) and
-    // library/top-level globals (C6/C7) assign to the underlying Go variable
-    // directly; other cases fall through to the ctx path.
-    let origin = self["resolvedOrigin"];
-    let kind = self["resolvedKind"];
-    let useGoVar = false;
-    let isGlobal = false;
-    if (origin == "param") { useGoVar = true; }
-    if (origin == "let") {
-        if (kind == "local" || kind == "captured") { useGoVar = true; }
-    }
-    if (kind == "global") {
-        if (origin == "lib" || origin == "def" || origin == "let") {
-            useGoVar = true;
-            isGlobal = true;
-        }
-    }
-    if (useGoVar) {
-        print(self["resolvedName"] + ' = ');
-        if (self["value"]["toGo"] != null) {
-            self["value"]["toGo"](self["value"])
-        }
-        // Mirror globals back to ctx so dynamic access (ctx.Get from
-        // unresolved paths) stays coherent.
-        if (isGlobal) {
-            print('; ctx.Update("' + self["name"] + '", ' + self["resolvedName"] + ')');
-        }
-        return null;
-    }
-    print('ctx.Update("'+self["name"]+'", ');
+    // Phase 2: emit Node tree; evalAssign handles ctx.Update/Create
+    print('&Node{kind: nkAssign, name: "' + self["name"] + '", right: ');
     if (self["value"]["toGo"] != null) {
-        self["value"]["toGo"](self["value"])
+        self["value"]["toGo"](self["value"]);
     }
-    print(')');
-    return null;
+    print('}');
 }
 
 // assignmentStatementEvaluate function: calls value's evaluate and assigns to context
@@ -839,13 +799,17 @@ def toJsonExpressionStatement(self) {
 }
 
 def toGoJsonExpressionStatement(self) {
-    let expr = self["expression"]
+    // Phase 2: emit Node tree for expression statement
+    let expr = self["expression"];
     if (expr == null) {
+        print('&Node{kind: nkExprStmt}');
         return;
     }
+    print('&Node{kind: nkExprStmt, left: ');
     if (expr["toGo"] != null) {
         expr["toGo"](expr);
     }
+    print('}');
 }
 
 
@@ -882,6 +846,7 @@ def opCodeFor(op) {
     if (op == ">=") { return "opGte"; }
     if (op == "&&") { return "opAnd"; }
     if (op == "||") { return "opOr"; }
+    if (op == "!") { return "opNot"; }
     return "opAdd";
 }
 
@@ -927,89 +892,16 @@ def infixExpressionToJson(self) {
 }
 
 def infixExpressionToGo(self) {
-    // Go: val.Multiply(val2)
-
+    // Phase 2: emit Node tree; evalInfix handles operator dispatch
+    print('&Node{kind: nkInfix, op: ' + opCodeFor(self["operator"]) + ', left: ');
     if (self["left"]["toGo"] != null) {
         self["left"]["toGo"](self["left"]);
     }
-    
-    let op = self["operator"];
-    if (op == "==") {
-        print('.Equals(');
-    }
-    else {
-        if (op == "+") {
-            print('.Add(');
-        }
-        else {
-            if (op == "<") {
-                print('.LessThan(');
-            }
-            else {
-                if (op == "<=") {
-                    print('.LessThanEqual(');
-                }
-                else {
-                    if (op == ">=") {
-                        print('.BiggerThanEqual(');
-                    }    
-                    else {
-                        if (op == ">") {
-                            print('.BiggerThan(');
-                        } 
-                        else {
-                            if (op == "&&") {
-                                print('.And(');
-                            }
-                            else {
-                                if (op == "||") {
-                                    print('.Or(');
-                                }    
-                                else {
-                                    if (op == "*") {
-                                        print('.Multiply(');
-                                    }   
-                                    else {
-                                        if (op == "/") {
-                                            print('.Divide(');
-                                        }
-                                        else {
-                                            if (op == "-") {
-                                                print('.Subtract(');
-                                            }
-                                            else {
-                                                if (op == "!=") {
-                                                    print('.Equals(');
-                                                }
-                                                else {
-                                                    if (op == "%") {
-                                                        print('.Modulo(');
-                                                    }
-                                                    else {   
-                                                        print("/* FIXME infix  " + op + " */"); //GODEBUG 
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }   
-                    }
-                }
-            }
-        }
-    }
-
+    print(', right: ');
     if (self["right"]["toGo"] != null) {
         self["right"]["toGo"](self["right"]);
     }
-
-    print(')');
-
-    if (op == "!=") {
-        print('.Not()');
-    }
+    print('}');
 }
 
 
@@ -1045,7 +937,7 @@ def nullLiteralToJson(self) {
 }
 
 def nullLiteralToGo(self) {
-    print('vNull()');
+    print('&Node{kind: nkNullLit}');
 }
 
 
@@ -1206,74 +1098,25 @@ def blockStatementToJson(self) {
 }
 
 def blockStatementToGo(self) {
+    // Phase 2: emit Node tree block; evalBlock handles ctx + result tracking
     let stmts = self["statements"];
     let n = len(stmts);
 
-    // Skip NewContext when this block has no declarations that still rely on
-    // ctx. After C4, `let` is emitted as a Go var and no longer needs ctx at
-    // all, so only nested `def` declarations (which still use ctx.Create) keep
-    // the block-local NewContext.
-    let hasLocal = false;
-    let j = 0;
-    while (j < n) {
-        let t = stmts[j]["type"];
-        if (t == "FunctionDeclaration") { hasLocal = true; }
-        j = j + 1;
-    }
-
-    puts("{");
-    if (hasLocal) {
-        puts("ctx := NewContext(ctx)");
-        puts('if ctx == nil {'); //dirty hack to avoid declared and not used: ctx error
-        puts('    fmt.Println("NOOP");');
-        puts('}');
-    } else {
-        puts("_ = ctx");
-    }
+    print('&Node{kind: nkBlock, list: []*Node{');
 
     let i = 0;
     while (i < n) {
         let stmt = stmts[i];
-
-        // Keep track of last result in case of missing return statement in
-        // function. `result=<expr>` only works when <expr> is a Go expression;
-        // statically-resolved param/let assignments emit Go statements of the
-        // form `ij_x = value`, so that case needs two emitted lines.
-        let isLast = (i == n-1);
-        let isGoVarAssign = false;
-        if (stmt["type"] == "AssignmentStatement") {
-            let so = stmt["resolvedOrigin"];
-            let sk = stmt["resolvedKind"];
-            if (so == "param") { isGoVarAssign = true; }
-            if (so == "let") {
-                if (sk == "local" || sk == "captured") { isGoVarAssign = true; }
-            }
-            if (sk == "global") {
-                if (so == "lib" || so == "def" || so == "let") { isGoVarAssign = true; }
-            }
-        }
-
-        if (isLast && stmt["type"] != "ReturnStatement") {
-            if (stmt["type"] == "AssignmentStatement") {
-                if (!isGoVarAssign) { print('result='); }
-            }
-            if (stmt["type"] == "IndexAssignmentStatement") { print('result='); }
-            if (stmt["type"] == "ExpressionStatement") { print('result='); }
-        }
-
         if (stmt["toGo"] != null) {
             stmt["toGo"](stmt);
-            puts("");
         }
-
-        if (isLast && isGoVarAssign) {
-            puts('result=' + stmt["resolvedName"]);
+        if (i < n - 1) {
+            print(',');
         }
-
         i = i + 1;
     }
 
-    print("}"); // to support } else {
+    print('}}');
 }
 
 
@@ -1859,137 +1702,37 @@ def resolveScopes(ast) {
 }
 
 def functionDeclarationToGo(self) {
-    // Go: ctx.Create("factorial", NewFunctionCommand(func(ctx *Context, params *ArrayValue) (result Value) {
-    //   ctx.Create("x", params.Get(IntValue{val: 0}))
-    //   ...
-	// return result
-	//}))
-    
-    // Top-level defs (C6) become package-level Go vars so references can be
-    // routed directly to the function value without going through ctx.Get.
-    // Non-root defs still go through ctx.Create as before.
-    // Only the enclosing scope being the program root qualifies. Nested defs
-    // that happen to share a name with a top-level def (and thus resolve to
-    // origin=def,kind=global) must still emit via ctx.Create, otherwise they
-    // overwrite the package-level ij_<name> of the outer function.
-    let atRoot = (self["resolvedAtRoot"] == true);
-    // D1: use NewStaticFunctionCommand when the body has been analyzed as
-    // ctx-free, letting Execute reuse the caller's ctx instead of allocating
-    // a fresh Context per invocation.
-    let ctor = "NewFunctionCommand";
-    if (self["resolvedIsStatic"] == true) { ctor = "NewStaticFunctionCommand"; }
+    // Phase 2: emit Node tree; evalFuncDecl creates Go closure dynamically
+    print('&Node{kind: nkFuncDecl, name: "' + self["name"] + '", params: []string{');
 
-    // D2: for top-level static defs, emit a fixed-arity package-level Go
-    // function `ij_<name>_impl(ctx, ij_arg0, ...)` that callers can invoke
-    // directly, skipping both the *ArrayValue allocation and the Execute
-    // interface-dispatch layer. Emit only the wrapper+ctx.Create inline; the
-    // impl goes on transpilerImplQueue and is emitted after goLibSuffix.
-    // Only the LAST occurrence per name is eligible because the impl symbol
-    // is package-level and Go forbids redeclaration. Earlier occurrences
-    // (needed for patterns like `let oldX = X; def X(...) {...}`) fall back
-    // to the inline-wrapper emission below.
-    let useImpl = false;
-    if (atRoot) {
-        if (self["resolvedIsStatic"] == true) {
-            if (self["resolvedIsLastAtRoot"] == true) { useImpl = true; }
+    let params = self["parameters"];
+    let pn = len(params);
+    let pi = 0;
+    while (pi < pn) {
+        if (pi > 0) {
+            print(',');
         }
+        print('"' + params[pi] + '"');
+        pi = pi + 1;
     }
 
-    if (useImpl) {
-        let pn = len(self["parameters"]);
-        transpilerStaticImpls[self["name"]] = pn;
-        push(transpilerImplQueue, self);
+    print('}, body: ');
 
-        puts(self["resolvedName"] + ' = vFunc(NewStaticFunctionCommand(ctx,func(ctx *Context, params *ArrayValue) Value {');
-        let ci = 0;
-        let forwardArgs = "";
-        while (ci < pn) {
-            if (ci > 0) { forwardArgs = forwardArgs + ","; }
-            forwardArgs = forwardArgs + "params.Get(Value{tag: tInt, i: " + intString(ci) + "})";
-            ci = ci + 1;
-        }
-        let sep = "";
-        if (pn > 0) { sep = ","; }
-        puts('return ' + self["resolvedName"] + '_impl(ctx' + sep + forwardArgs + ')');
-        puts('}))');
-        puts('ctx.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
-        return null;
-    }
-
-    if (atRoot) {
-        puts(self["resolvedName"] + ' = vFunc(' + ctor + '(ctx,func(ctx *Context, params *ArrayValue) (result Value) {');
-    } else {
-        puts('ctx.Create("' + self["name"] + '", vFunc(' + ctor + '(ctx,func(ctx *Context, params *ArrayValue) (result Value) {');
-    }
-    puts('result=vNull()');
-
-    let i = 0;
-    while (i < len(self["parameters"])) {
-        let param = self["parameters"][i];
-        let mangled = mangle(param);
-
-        puts('var ' + mangled + ' Value = params.Get(Value{tag: tInt, i: ' + intString(i) + '})');
-        puts('_ = ' + mangled);
-
-        i = i + 1;
-    }
-
-    // Emit the body via blockStatementToGo so the body gets its own Go scope.
-    // This lets function-local `let` shadow parameters (e.g. `def f(i) { let i = ... }`),
-    // since the `var ij_i` inside the inner block is a distinct variable from the
-    // parameter binding emitted above.
     let body = self["body"];
     if (body != null) {
         if (body["toGo"] != null) {
             body["toGo"](body);
-            puts("");
         }
     }
 
-    puts('return result')
-    if (atRoot) {
-        puts('}))');
-        puts('ctx.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
-    } else {
-        puts('})))');
-    }
+    print('}');
 }
 
 // D2: drain transpilerImplQueue, emitting one package-level Go function per
 // queued static top-level def. Called after goLibSuffix so the impls live at
 // package scope.
 def emitQueuedImpls() {
-    let n = len(transpilerImplQueue);
-    let i = 0;
-    while (i < n) {
-        let self = transpilerImplQueue[i];
-        let pn = len(self["parameters"]);
-        let sig = 'func ' + self["resolvedName"] + '_impl(ctx *Context';
-        let p = 0;
-        while (p < pn) {
-            sig = sig + ', ' + mangle(self["parameters"][p]) + ' Value';
-            p = p + 1;
-        }
-        sig = sig + ') (result Value) {';
-        puts(sig);
-        puts('_ = ctx');
-        let q = 0;
-        while (q < pn) {
-            puts('_ = ' + mangle(self["parameters"][q]));
-            q = q + 1;
-        }
-        puts('result=vNull()');
-        let body = self["body"];
-        if (body != null) {
-            if (body["toGo"] != null) {
-                body["toGo"](body);
-                puts("");
-            }
-        }
-        puts('return result');
-        puts('}');
-        i = i + 1;
-    }
+    // no-op: D2 dropped for Phase 2 Node tree
 }
 
 
@@ -2033,14 +1776,18 @@ def numberLiteralToJson(node) {
 def numberLiteralToGo(self) {
     let str = string(self["value"]);
     let i = 0;
+    let isDouble = false;
     while (i < len(str)) {
         if (char(str, i) == ".") {
-            print('Value{tag: tDouble, d: ' + str + '}');
-            return;
+            isDouble = true;
         }
         i = i + 1;
     }
-    print('Value{tag: tInt, i: ' + str + '}');
+    if (isDouble) {
+        print('&Node{kind: nkDoubleLit, dVal: ' + str + '}');
+    } else {
+        print('&Node{kind: nkIntLit, iVal: ' + str + '}');
+    }
 }
 
 
@@ -2089,7 +1836,7 @@ def stringLiteralToJson(thisNode) {
 }
 
 def stringLiteralToGo(self) {
-    print('Value{tag: tString, s: "' + escapeGoStringLiteral(self["value"]) + '"}');
+    print('&Node{kind: nkStringLit, name: "' + escapeGoStringLiteral(self["value"]) + '"}');
 }
 
 def escapeGoStringLiteral(s) {
@@ -2152,10 +1899,10 @@ def toJsonBooleanLiteral(self) {
 
 def toGoBooleanLiteral(self) {
     if (self["value"]) {
-        print('vBool(true)');
+        print('&Node{kind: nkBoolLit, bVal: true}');
     }
     else {
-        print('vBool(false)');
+        print('&Node{kind: nkBoolLit, bVal: false}');
     }
 }
 
@@ -2193,32 +1940,8 @@ def identifierToJson(self) {
 }
 
 def identifierToGo(self) {
-    // Go: hello vs. ctx.Get("hello")
-
-    // Static resolution: params and function-local lets are emitted as Go
-    // vars (phases C3/C4); library functions and top-level lets/defs are
-    // emitted as package-level Go vars (phases C6/C7). Only truly
-    // unresolved globals fall back to ctx.Get.
-    let origin = self["resolvedOrigin"];
-    let kind = self["resolvedKind"];
-    if (origin == "param") {
-        print(self["resolvedName"]);
-        return null;
-    }
-    if (origin == "let") {
-        if (kind == "local" || kind == "captured") {
-            print(self["resolvedName"]);
-            return null;
-        }
-    }
-    if (kind == "global") {
-        if (origin == "lib" || origin == "def" || origin == "let") {
-            print(self["resolvedName"]);
-            return null;
-        }
-    }
-    print('ctx.Get("' + self["name"] + '")');
-    return null;
+    // Phase 2: all identifiers become Node tree references; evalIdent resolves via ctx.Get
+    print('&Node{kind: nkIdent, name: "' + self["name"] + '"}');
 }
 
 
@@ -3297,62 +3020,28 @@ def CallExpression_toJson(self) {
 }
 
 def CallExpression_toGo(self) {
-    //Go: ctx.Get("puts").Execute(ctx, NewArrayValue(StringValue{val: "Computing factorial for:" + val.String()}))
-    
+    // Phase 2: emit Node tree; evalCall handles Execute
     let callee = self["callee"];
-    let argsLen = len(self["arguments"]);
+    let args = self["arguments"];
+    let argsLen = len(args);
 
-    // D2: when the callee is an Identifier that resolves to a top-level
-    // static `def` whose impl has matching arity, emit a direct fixed-arity
-    // Go call. Skips both the *ArrayValue allocation and the interface
-    // dispatch through FunctionCommand.Execute.
-    if (callee != null) {
-        if (callee["type"] == "Identifier") {
-            let origin = callee["resolvedOrigin"];
-            let kind = callee["resolvedKind"];
-            if (origin == "def") {
-                if (kind == "global") {
-                    let arity = transpilerStaticImpls[callee["name"]];
-                    if (arity != null) {
-                        if (arity == argsLen) {
-                            print(mangle(callee["name"]) + '_impl(ctx');
-                            let di = 0;
-                            while (di < argsLen) {
-                                print(',');
-                                let argNode = self["arguments"][di];
-                                if (argNode["toGo"] != null) {
-                                    argNode["toGo"](argNode);
-                                }
-                                di = di + 1;
-                            }
-                            print(')');
-                            return null;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    print('&Node{kind: nkCall, left: ');
     callee["toGo"](callee);
-    print('.Execute(ctx, NewArrayValue(');
+    print(', list: []*Node{');
 
     let i = 0;
     while (i < argsLen) {
         if (i > 0) {
             print(',');
         }
-
-        let argNode = self["arguments"][i];
-        
+        let argNode = args[i];
         if (argNode["toGo"] != null) {
             argNode["toGo"](argNode);
         }
-
         i = i + 1;
     }
 
-    print('))');
+    print('}}');
 }
 
 // Helper: value to string for non-function error message
@@ -3479,71 +3168,29 @@ def ifStatementToJson(self) {
 // use a direct bool-returning helper to skip the intermediate BoolValue.
 // Fall back to `<value>.IsTruthy()` for anything else.
 def conditionToGoBool(condNode) {
+    // Phase 2: condition is a child Node in if/while; evalIf/evalWhile evaluate and check IsTruthy
     if (condNode != null) {
-        if (condNode["type"] == "InfixExpression") {
-            let op = condNode["operator"];
-            let helper = null;
-            if (op == "==") { helper = "EqualsBool"; }
-            if (op == "!=") { helper = "NotEqualsBool"; }
-            if (op == "<")  { helper = "LessThanBool"; }
-            if (op == "<=") { helper = "LessThanEqualBool"; }
-            if (op == ">")  { helper = "BiggerThanBool"; }
-            if (op == ">=") { helper = "BiggerThanEqualBool"; }
-            if (helper != null) {
-                print(helper + '(');
-                if (condNode["left"]["toGo"] != null) {
-                    condNode["left"]["toGo"](condNode["left"]);
-                }
-                print(',');
-                if (condNode["right"]["toGo"] != null) {
-                    condNode["right"]["toGo"](condNode["right"]);
-                }
-                print(')');
-                return null;
-            }
-        }
-        if (condNode["type"] == "PrefixExpression") {
-            if (condNode["operator"] == "!") {
-                print('(!');
-                if (condNode["right"]["toGo"] != null) {
-                    condNode["right"]["toGo"](condNode["right"]);
-                }
-                print('.IsTruthy())');
-                return null;
-            }
+        if (condNode["toGo"] != null) {
+            condNode["toGo"](condNode);
         }
     }
-    if (condNode["toGo"] != null) {
-        condNode["toGo"](condNode);
-    }
-    print('.IsTruthy()');
-    return null;
 }
 
 def ifStatementToGo(self) {
-    // Go: if true {
-	//   return IntValue{val: 100}
-	// } else {
-	//   return IntValue{val: 111}
-    // }
-
-    print('if ');
-
+    // Phase 2: emit Node tree; evalIf handles condition + branching
+    print('&Node{kind: nkIfStmt, left: ');
     conditionToGoBool(self["condition"]);
-
-    print(' ');
-
+    print(', body: ');
     if (self["consequence"]["toGo"] != null) {
-        self["consequence"]["toGo"](self["consequence"])
+        self["consequence"]["toGo"](self["consequence"]);
     }
-
     if (self["alternative"] != null) {
-        print(' else ');
-
+        print(', right: ');
         if (self["alternative"]["toGo"] != null) {
-            self["alternative"]["toGo"](self["alternative"])
-        }   
+            self["alternative"]["toGo"](self["alternative"]);
+        }
     }
+    print('}');
 }
 
 
@@ -3977,29 +3624,15 @@ def PrefixExpression_toJson(self) {
 }
 
 def PrefixExpression_toGo(self) {
+    // Phase 2: emit Node tree; evalPrefix handles ! and -
     let op = self["operator"];
-
-    if (op == "-") {
-        print('Value{tag: tInt, i: -1}.Multiply(');
-
-        if (self["right"]["toGo"] != null) {
-            self["right"]["toGo"](self["right"])
-        }
-
-        print(')');
+    let opCode = "opNeg";
+    if (op == "!") { opCode = "opNot"; }
+    print('&Node{kind: nkPrefix, op: ' + opCode + ', right: ');
+    if (self["right"]["toGo"] != null) {
+        self["right"]["toGo"](self["right"]);
     }
-    else {
-        if (op == "!") {
-            if (self["right"]["toGo"] != null) {
-                self["right"]["toGo"](self["right"])
-            }
-
-            print(".Not()")
-        }
-        else {
-            puts(" //FIXME PrefixExpression_toGo " + self["operator"]);
-        }
-    }
+    print('}');
 }
 
 
@@ -4376,25 +4009,20 @@ def indexAssignmentStatement_toJson(self) {
 }
 
 def indexAssignmentStatement_toGo(self) {
-    // Go: foo.Put(IntValue{val: 0}, IntValue{val: 999})
-
+    // Phase 2: emit Node tree; evalIndexAssign handles Put
+    print('&Node{kind: nkIndexAssign, left: ');
     if (self["collection"]["toGo"] != null) {
-        self["collection"]["toGo"](self["collection"])
+        self["collection"]["toGo"](self["collection"]);
     }
-
-    print('.Put(')
-
+    print(', right: ');
     if (self["index"]["toGo"] != null) {
-        self["index"]["toGo"](self["index"])
+        self["index"]["toGo"](self["index"]);
     }
-
-    print(',')
-
+    print(', body: ');
     if (self["value"]["toGo"] != null) {
-        self["value"]["toGo"](self["value"])
+        self["value"]["toGo"](self["value"]);
     }
-
-    print(')')
+    print('}');
 }
 
 
@@ -4522,9 +4150,8 @@ def makeMapLiteral(pairs, position) {
   node["toJson"] = toJson;
 
   def toGo(self) {
-    // Go: bar := NewMapValue(KeyValuePair{Key: IntValue{val: 66}, Value: IntValue{val: 999}})
-    
-    print('NewMapValue(');
+    // Phase 2: emit Node tree; evalMapLit handles construction
+    print('&Node{kind: nkMapLit, list: []*Node{');
 
     let pairsArr = node["pairs"];
     let i = 0;
@@ -4536,24 +4163,21 @@ def makeMapLiteral(pairs, position) {
       if (i > 0) {
         print(",");
       }
-      print('KeyValuePair{Key: ');
 
       if (keyNode["toGo"] != null) {
-        keyNode["toGo"](keyNode)
+        keyNode["toGo"](keyNode);
       }
 
-      print(', Value: ');
+      print(',');
 
       if (valueNode["toGo"] != null) {
-        valueNode["toGo"](valueNode)
+        valueNode["toGo"](valueNode);
       }
 
-      print('}');
-
-      i = i + 1
+      i = i + 1;
     }
 
-    print(')');
+    print('}}');
   }
   node["toGo"] = toGo;
 
@@ -4731,7 +4355,11 @@ def makeProgram() {
             i = i + 1;
         }
     }
-    program["toGo"] = toGo;
+    if (useNodeTree) {
+        program["toGo"] = programToGoPhase2;
+    } else {
+        program["toGo"] = toGo;
+    }
 
     return program;
 }
@@ -4786,38 +4414,16 @@ def variableDeclarationToJson(self) {
 }
 
 def variableDeclarationToGo(self) {
-    // Function-local lets are emitted as Go vars so references can resolve
-    // statically (C4).
-    if (self["resolvedAtRoot"] == false) {
-        print('var ' + self["resolvedName"] + ' Value = ');
-        let init = self["initializer"];
-        if (init != null) {
-            if (init["toGo"] != null) {
-                init["toGo"](init);
-            }
-        } else {
-            print('vNull()');
-        }
-        puts('');
-        puts('_ = ' + self["resolvedName"]);
-        return null;
-    }
-
-    // Root-level `let` (C7): assign to the package-level Go var and keep
-    // the ctx.Create mirror for dynamic lookup fallback.
-    print(self["resolvedName"] + ' = ');
-    let init = self["initializer"]
+    // Phase 2: emit Node tree; evalVarDecl handles ctx.Create
+    print('&Node{kind: nkVarDecl, name: "' + self["name"] + '"');
+    let init = self["initializer"];
     if (init != null) {
+        print(', right: ');
         if (init["toGo"] != null) {
             init["toGo"](init);
         }
     }
-    else {
-        print('vNull()');
-    }
-    puts('');
-    puts('ctx.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
-    return null;
+    print('}');
 }
 
 
@@ -5886,35 +5492,60 @@ puts("}");
 puts("return last, false");
 puts("}");
 puts("");
-puts("func main() {");
-puts("if pf := os.Getenv(" + chr(34) + "IJ_CPUPROFILE" + chr(34) + "); pf != " + chr(34) + chr(34) + " {");
-puts("f, err := os.Create(pf)");
-puts("if err == nil {");
-puts("if err := pprof.StartCPUProfile(f); err == nil {");
-puts("defer pprof.StopCPUProfile()");
-puts("defer f.Close()");
-puts("}");
-puts("}");
-puts("}");
-puts("ctx := NewContext(nil)");
-puts("registerLibraryFunctions(ctx)");
-puts("defer func() {");
-puts("if os.Getenv(" + chr(34) + "IJ_COUNTERS" + chr(34) + ") != " + chr(34) + chr(34) + " {");
-puts("fmt.Fprintf(os.Stderr, " + chr(34) + "[IJ counters] NewContext=%d Create=%d Get=%d Update=%d MapGet=%d MapPut=%d FuncExec=%d NewMap=%d NewArr=%d Promote=%d" + chr(92) + "n" + chr(34) + ", ijCountNewContext, ijCountCreate, ijCountGet, ijCountUpdate, ijCountMapGet, ijCountMapPut, ijCountFuncExec, ijCountNewMap, ijCountNewArr, ijCountCtxPromote)");
-puts("}");
-puts("}()");
-puts("_ = ctx");
-puts("var result Value = vNull()");
-puts("if result.IsTruthy() {");
-puts("fmt.Println(" + chr(34) + "NO OP" + chr(34) + ")");
-puts("}");
+
 }
 
 
 def goLibSuffix() {
-puts("");
-puts("}");
+// no-op: main() now emitted by programToGoPhase2
 }
+// Phase 2: Node tree program emitter — top-level def so refreshToGoPointers can rebind
+let useNodeTree = true;
+
+def programToGoPhase2(self) {
+    // Emit func main() with Node tree + eval()
+    puts("func main() {");
+    puts("if pf := os.Getenv(" + chr(34) + "IJ_CPUPROFILE" + chr(34) + "); pf != " + chr(34) + chr(34) + " {");
+    puts("f, err := os.Create(pf)");
+    puts("if err == nil {");
+    puts("if err := pprof.StartCPUProfile(f); err == nil {");
+    puts("defer pprof.StopCPUProfile()");
+    puts("defer f.Close()");
+    puts("}");
+    puts("}");
+    puts("}");
+    puts("ctx := NewContext(nil)");
+    puts("registerLibraryFunctions(ctx)");
+    puts("defer func() {");
+    puts("if os.Getenv(" + chr(34) + "IJ_COUNTERS" + chr(34) + ") != " + chr(34) + chr(34) + " {");
+    puts("fmt.Fprintf(os.Stderr, " + chr(34) + "[IJ counters] NewContext=%d Create=%d Get=%d Update=%d MapGet=%d MapPut=%d FuncExec=%d NewMap=%d NewArr=%d Promote=%d" + chr(92) + "n" + chr(34) + ", ijCountNewContext, ijCountCreate, ijCountGet, ijCountUpdate, ijCountMapGet, ijCountMapPut, ijCountFuncExec, ijCountNewMap, ijCountNewArr, ijCountCtxPromote)");
+    puts("}");
+    puts("}()");
+
+    let stmts = self["statements"];
+    let n = len(stmts);
+
+    print("programNode := &Node{kind: nkProgram, list: []*Node{");
+
+    let i = 0;
+    while (i < n) {
+        let stmt = stmts[i];
+        if (stmt["toGo"] != null) {
+            stmt["toGo"](stmt);
+        }
+        if (i < n - 1) {
+            print(",");
+        }
+        i = i + 1;
+    }
+
+    print("}}");
+    puts("");
+    puts("eval(programNode, ctx)");
+    puts("}");
+}
+
+
 
 
 // Interpreter.s - InterpreterJ port of the Interpreter Java class
@@ -6527,38 +6158,7 @@ if (transpileGo) {
         // D2: drain the queue of static top-level defs, emitting each as a
         // package-level ij_<name>_impl(...) fixed-arity Go function.
         emitQueuedImpls();
-        // Emit package-level Value vars for every name we treat as a static
-        // global (C6/C7): built-in library functions and top-level let/def.
-        // Deduplicate because user code may shadow library names with its
-        // own top-level declarations.
-        let astRoot = interpreter["ast"];
-        if (astRoot != null) {
-            let emitted = {};
-            let libs = astRoot["resolvedLibraryGlobals"];
-            if (libs != null) {
-                let gi = 0;
-                while (gi < len(libs)) {
-                    let lname = libs[gi];
-                    if (emitted[lname] == null) {
-                        puts("var " + mangle(lname) + " Value");
-                        emitted[lname] = true;
-                    }
-                    gi = gi + 1;
-                }
-            }
-            let roots = astRoot["resolvedRootGlobals"];
-            if (roots != null) {
-                let gj = 0;
-                while (gj < len(roots)) {
-                    let rname = roots[gj];
-                    if (emitted[rname] == null) {
-                        puts("var " + mangle(rname) + " Value");
-                        emitted[rname] = true;
-                    }
-                    gj = gj + 1;
-                }
-            }
-        }
+
         puts("EOX");
         puts("go build app.go");
     }

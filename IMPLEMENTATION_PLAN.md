@@ -1,6 +1,6 @@
 # Implementation Plan — Self-Hosted Interpreter 10x Perf
 
-Status: **Phase 0 complete, Phase 1 complete, Phase 2 partial (goLibPrefix + iterative refreshToGoPointers done, Node tree codegen reverted)**
+Status: **Phase 0 complete, Phase 1 complete, Phase 2 partial (Node tree codegen active; verify.sh 1-5 pass via fb2b299 transpiler; full self-hosted transpile produces truncated output)**
 
 ## Phase 0 — Baseline Capture ✅
 
@@ -75,7 +75,7 @@ Self-bootstrap constraint forced parallel type hierarchies during transition. Cl
 
 ## Phase 2 — Typed AST Struct Nodes 🔄
 
-Status: **Partial. goLibPrefix emits Node types + eval runtime. refreshToGoPointers iterative. *ToGo emitters still Phase 1 (Value-based) style. Check 5 passes.**
+Status: **Partial. Node tree codegen active. *ToGo emitters rewritten to emit `&Node{...}`. goLibPrefix emits Node types + eval runtime. refreshToGoPointers iterative. verify.sh 1-5 pass via fb2b299 transpiler. Full self-hosted transpile truncated.**
 
 ### Completed
 
@@ -85,14 +85,36 @@ Status: **Partial. goLibPrefix emits Node types + eval runtime. refreshToGoPoint
 - [x] `refreshToGoPointers` converted to iterative (fixes stack overflow)
 - [x] fb2b299 binary used as transpiler bridge (committed binary at dba0ddc has stack overflow, pre-cleanup binary at fb2b299 works)
 
-### Reverted: Node tree *ToGo codegen
+### Completed: Node tree *ToGo codegen
 
-All 21 `*ToGo` emitters were rewritten to emit `&Node{...}` struct literals, then reverted. Mixed `puts()`/`print()` in `blockStatementToGo` and `programToGo` caused Go compile errors — FunctionDeclarations emit via `puts()` (package-level Go) while Node tree statements use `print()` (inline struct literals), producing struct literals concatenated with Go statements without separators.
+All 21 `*ToGo` emitters rewritten to emit `&Node{...}` struct literals:
+- `numberLiteralToGo`, `stringLiteralToGo`, `booleanLiteralToGo`, `nullLiteralToGo`
+- `arrayLiteralToGo`, `mapLiteralToGo`
+- `variableDeclarationToGo`, `functionDeclarationToGo`
+- `identifierToGo`, `assignmentStatementToGo`
+- `blockStatementToGo`, `programToGoPhase2`
+- `PrefixExpression_toGo`, `InfixExpression_toGo`, `CallExpression_toGo`, `IndexExpression_toGo`
+- `IfExpression_toGo`, `WhileExpression_toGo`
+- `ReturnStatement_toGo`, `PrintStatement_toGo`, `ExpressionStatement_toGo`
 
-### Remaining
+**Wiring:**
+- [x] `goLibPrefix`: main() emission removed (Phase 2 style)
+- [x] `programToGoPhase2`: new top-level def emitting main() with Node tree + eval()
+- [x] `useNodeTree` flag = true; `makeProgram` conditionally uses `programToGoPhase2`
+- [x] `goLibSuffix` and `emitQueuedImpls`: no-ops (D2 dropped)
+- [x] Package-level var declarations removed
 
-- [ ] Rework `*ToGo` emitters for Node tree output. Key requirement: block/program emitters must separate FunctionDeclarations (`puts`, package-level Go closures) from Node tree statements (`print`, inline struct literals). When `blockStatementToGo` encounters a `def`, emit the Go closure via `puts()`; all other statements become `print()` calls producing `&Node{...}` literals.
-- [ ] Verify: check 5, test suite, benchmark
+**Fixes:**
+- [x] `opCodeFor` fixed: added "!" → opNot mapping
+- [x] `PrefixExpression_toGo` fixed: uses correct op codes for prefix operators (`-` → opNeg, `!` → opNot)
+
+**Verification:**
+- [x] test.sh: all pass
+- [x] verify.sh: checks 1-5 all pass (using fb2b299 as transpiler)
+- [x] Simple programs compile and run correctly with Phase 2 codegen
+
+**Known issue:**
+- [ ] Full self-hosted transpile of interpreter.s produces truncated output (goLibPrefix runs, programToGoPhase2 doesn't emit) — needs debugging
 
 ### fix_app_go.py updates
 
