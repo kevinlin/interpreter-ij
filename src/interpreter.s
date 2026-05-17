@@ -1106,11 +1106,25 @@ def blockStatementToJson(self) {
 }
 
 def blockStatementToGo(self) {
-    // Phase 2: emit Node tree block; evalBlock handles ctx + result tracking
+    // Phase 2.5: project hasLocals so evalBlock can skip its per-block
+    // NewContext() allocation when the resolver tagged this block as
+    // introducing zero bindings (resolvedLocals is empty). This is the
+    // dominant alloc inside while/for bodies that don't declare any `let`.
     let stmts = self["statements"];
     let n = len(stmts);
+    let locals = self["resolvedLocals"];
+    let emitHasLocals = false;
+    if (locals != null) {
+        if (len(locals) > 0) {
+            emitHasLocals = true;
+        }
+    }
 
-    print('&Node{kind: nkBlock, list: []*Node{');
+    print('&Node{kind: nkBlock');
+    if (emitHasLocals) {
+        print(', hasLocals: true');
+    }
+    print(', list: []*Node{');
 
     let i = 0;
     while (i < n) {
@@ -5167,7 +5181,11 @@ puts("definitionCtx *Context");
 puts("executeFunc   func(*Context, *ArrayValue) Value");
 puts("}");
 puts("func (c *FunctionCommand) Execute(callerCtx *Context, params *ArrayValue) Value {");
-puts("return c.executeFunc(NewContext(c.definitionCtx), params)");
+puts("// Phase 2.5: pass nil to executeFunc. The closure body already opens its own");
+puts("// `local := NewContext(defCtx)` (evalFuncDecl emit), so any ctx we pass here");
+puts("// is discarded. Skipping NewContext(c.definitionCtx) saves one *Context alloc");
+puts("// per function invocation -- this is the inner-loop allocator in sample.s.");
+puts("return c.executeFunc(nil, params)");
 puts("}");
 puts("func (c *FunctionCommand) String() string { return " + chr(34) + "function" + chr(34) + " }");
 puts("func (c *FunctionCommand) IsTruthy() bool { return true }");
@@ -5352,7 +5370,17 @@ puts("coll.Put(idx, rhs)");
 puts("return rhs, false");
 puts("}");
 puts("func evalBlock(n *Node, ctx *Context) (Value, bool) {");
-puts("blockCtx := NewContext(ctx)");
+puts("// Phase 2.5: skip the per-block *Context allocation when the resolver");
+puts("// tagged this block as introducing zero bindings (hasLocals == false).");
+puts("// while/for bodies with no `let` are the dominant case in sample.s.");
+puts("// Reusing the caller's ctx is safe because evalAssign/evalVarDecl");
+puts("// already route to the right ctx via their own dispatch; identifier");
+puts("// reads walk the chain via ctx.Get which is identical to walking from");
+puts("// a fresh blockCtx whose only entry would be the (absent) locals.");
+puts("blockCtx := ctx");
+puts("if n.hasLocals {");
+puts("blockCtx = NewContext(ctx)");
+puts("}");
 puts("var last Value = vNull()");
 puts("for _, s := range n.list {");
 puts("v, returned := eval(s, blockCtx)");
