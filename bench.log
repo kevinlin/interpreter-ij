@@ -133,3 +133,20 @@ real	0m0.027s
 user	0m0.007s
 sys	0m0.013s
 
+=== 2026-05-17T16:32:39Z label=p2-no-refresh ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m20.478s
+user	2m18.479s
+sys	0m2.275s
+-- interpreter.sh sample.s --
+
+real	0m0.590s
+user	0m0.788s
+sys	0m0.092s
+-- native_interpreter.sh sample.s --
+
+real	0m0.037s
+user	0m0.007s
+sys	0m0.014s
+

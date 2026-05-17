@@ -4,10 +4,20 @@ Succinct rules for how to BUILD the project:
 
 ```bash
 ./src/compile-local.sh src/interpreter.s /tmp/ij_stage1  # transpile + compile
-# DO NOT cp /tmp/ij_stage1 interpreter_mac_arm64 yet — the committed binary is
-# a bridge artifact (see IMPLEMENTATION_PLAN.md P2). Fresh self-builds produce
-# a binary that lacks func main() due to a Phase 2 evalAssign closure-scope bug.
+# Fresh self-builds now emit a complete func main() (refreshToGoPointers excised).
+# But DO NOT cp /tmp/ij_stage1 interpreter_mac_arm64 yet — stage2 binary's IJ
+# tree-walker has a runtime regression on `let X = scalar` (see IMPLEMENTATION_PLAN
+# P2 blocker). Replacing the committed bridge breaks scripts/test.sh.
 # If you accidentally overwrite, run `git restore interpreter_mac_arm64`.
+#
+# Quick true-fixed-point check (when ready to verify reproducibility):
+#   ./src/compile-local.sh src/interpreter.s /tmp/s1
+#   cp /tmp/s1 interpreter_mac_arm64
+#   ./src/compile-local.sh src/interpreter.s /tmp/s2
+#   cp /tmp/s2 interpreter_mac_arm64
+#   ./src/compile-local.sh src/interpreter.s /tmp/s3
+#   cmp /tmp/s2 /tmp/s3   # must be byte-identical
+#   git restore interpreter_mac_arm64
 ```
 
 ## Validation

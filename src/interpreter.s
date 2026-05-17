@@ -5384,7 +5384,7 @@ puts("");
 }
 
 
-// Phase 2: Node tree program emitter — top-level def so refreshToGoPointers can rebind
+// Phase 2: Node tree program emitter — top-level def, captured AST closures stay live
 let useNodeTree = true;
 
 def programToGoPhase2(self) {
@@ -5586,107 +5586,18 @@ def makeInterpreter() {
     }
     interpreter["getAstJson"] = getAstJson;
 
-    def refreshToGoPointers(root) {
-        if (root == null) { return null; }
-        let stack = [root];
-        let sp = 0;
-        while (sp < len(stack)) {
-            let node = stack[sp];
-            sp = sp + 1;
-            if (node != null) {
-                let t = node["type"];
-                if (t == "Program") {
-                    // no-op; delegate to children
-                } else { if (t == "ExpressionStatement") { node["toGo"] = toGoJsonExpressionStatement; }
-                else { if (t == "BlockStatement") { node["toGo"] = blockStatementToGo; }
-                else { if (t == "ReturnStatement") { node["toGo"] = ReturnStatement_toGo; }
-                else { if (t == "VariableDeclaration") { node["toGo"] = variableDeclarationToGo; }
-                else { if (t == "FunctionDeclaration") { node["toGo"] = functionDeclarationToGo; }
-                else { if (t == "IfStatement") { node["toGo"] = ifStatementToGo; }
-                else { if (t == "WhileStatement") { /* local closure */ }
-                else { if (t == "IndexExpression") { /* local closure */ }
-                else { if (t == "IndexAssignment") { node["toGo"] = indexAssignmentStatement_toGo; }
-                else { if (t == "InfixExpression") { node["toGo"] = infixExpressionToGo; }
-                else { if (t == "PrefixExpression") { node["toGo"] = PrefixExpression_toGo; }
-                else { if (t == "CallExpression") { node["toGo"] = CallExpression_toGo; }
-                else { if (t == "NumberLiteral") { node["toGo"] = numberLiteralToGo; }
-                else { if (t == "StringLiteral") { node["toGo"] = stringLiteralToGo; }
-                else { if (t == "BooleanLiteral") { node["toGo"] = toGoBooleanLiteral; }
-                else { if (t == "NullLiteral") { node["toGo"] = nullLiteralToGo; }
-                else { if (t == "Identifier") { node["toGo"] = identifierToGo; }
-                else { if (t == "ArrayLiteral") { node["toGo"] = arrayLiteralToGo; }
-                else { if (t == "MapLiteral") { /* local closure */ }
-                else { if (t == "AssignmentStatement") { node["toGo"] = assignmentStatementToGo; }
-                }}}}}}}}}}}}}}}}}}}}
-
-                // Push children onto stack
-                let stmts = node["statements"];
-                if (stmts != null) {
-                    let si = 0;
-                    while (si < len(stmts)) { stack = push(stack, stmts[si]); si = si + 1; }
-                }
-                let body = node["body"];
-                if (body != null) { stack = push(stack, body); }
-                let cond = node["condition"];
-                if (cond != null) { stack = push(stack, cond); }
-                let cons = node["consequence"];
-                if (cons != null) { stack = push(stack, cons); }
-                let alt = node["alternative"];
-                if (alt != null) { stack = push(stack, alt); }
-                let val = node["value"];
-                if (val != null) { stack = push(stack, val); }
-                let l = node["left"];
-                if (l != null) { stack = push(stack, l); }
-                let r = node["right"];
-                if (r != null) { stack = push(stack, r); }
-                let coll = node["collection"];
-                if (coll != null) { stack = push(stack, coll); }
-                let idx = node["index"];
-                if (idx != null) { stack = push(stack, idx); }
-                let elems = node["elements"];
-                if (elems != null) {
-                    let ei = 0;
-                    while (ei < len(elems)) { stack = push(stack, elems[ei]); ei = ei + 1; }
-                }
-                let callee = node["callee"];
-                if (callee != null) { stack = push(stack, callee); }
-                let args = node["arguments"];
-                if (args != null) {
-                    let ai = 0;
-                    while (ai < len(args)) { stack = push(stack, args[ai]); ai = ai + 1; }
-                }
-                let expr = node["expression"];
-                if (expr != null) { stack = push(stack, expr); }
-                let params = node["parameters"];
-                if (params != null) {
-                    let pi = 0;
-                    while (pi < len(params)) { stack = push(stack, params[pi]); pi = pi + 1; }
-                }
-                let init2 = node["initializer"];
-                if (init2 != null) { stack = push(stack, init2); }
-                let pairs = node["pairs"];
-                if (pairs != null) {
-                    let pi2 = 0;
-                    while (pi2 < len(pairs)) {
-                        let p = pairs[pi2];
-                        if (p != null) {
-                            if (p["key"] != null) { stack = push(stack, p["key"]); }
-                            if (p["value"] != null) { stack = push(stack, p["value"]); }
-                        }
-                        pi2 = pi2 + 1;
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
+    // Phase 2 codegen path: every *toGo* emitter is a top-level def, so the
+    // closures captured into AST nodes during parsing already point at the
+    // current global value. The Phase 1 refreshToGoPointers helper is therefore
+    // dead — and worse, when a fresh Phase-2 self-build runs interpreter.s on
+    // itself the helper aborts the toGo eval somewhere mid-walk, leaving stage2
+    // without a `func main()`. P2 deletes the helper to make stage1->stage2
+    // bit-identical. Do not reintroduce without a Phase-2 use-case.
     def toGo(self) {
         if (self["ast"] == null) {
             return null;
         }
         resolveScopes(self["ast"]);
-        refreshToGoPointers(self["ast"]);
         return self["ast"]["toGo"](self["ast"]);
     }
     interpreter["toGo"] = toGo;
