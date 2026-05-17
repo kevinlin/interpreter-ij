@@ -1244,6 +1244,22 @@ def mangle(name) {
     return "ij_" + name;
 }
 
+// Map the resolver's string-tagged annotation to the numeric rk* constant
+// emitted at runtime. Used by *ToGo emitters to project resolvedKind onto
+// Node literals so evalIdent/evalAssign/evalVarDecl can switch on it.
+def resolverKindCode(kind, origin) {
+    if (kind == "global") {
+        if (origin == "lib") { return "rkLib"; }
+        return "rkGlobal";
+    }
+    if (kind == "local") {
+        if (origin == "param") { return "rkParam"; }
+        return "rkLocal";
+    }
+    if (kind == "captured") { return "rkUpvalue"; }
+    return "rkGlobal";
+}
+
 // ============================================================================
 // Resolver pass: annotates the AST with scope/resolution info before toGo.
 //
