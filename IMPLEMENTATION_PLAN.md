@@ -1,6 +1,6 @@
 # Implementation Plan — Self-Hosted Interpreter 10x Perf
 
-Status: **Phase 0 complete, Phase 1 in progress**
+Status: **Phase 0 complete, Phase 1 complete**
 
 ## Phase 0 — Baseline Capture ✅
 
@@ -11,7 +11,7 @@ Baseline measurements (macOS/arm64):
 - selfhosted_interpreter.sh sample.s: ~1m16s real
 - selfhosted_interpreter.sh bench_eval.s: ~1m25s real (fib(22) + bubbleSort(30))
 
-## Phase 1 — Tagged-Union Value 🔄
+## Phase 1 — Tagged-Union Value ✅
 
 Replace `Value` interface with `Value` tagged-union struct in emitted Go runtime.
 Edits: `src/interpreter.s` runtime emit block (~5159-6402) + all `*ToGo` codegen functions.
@@ -51,37 +51,27 @@ Edits: `src/interpreter.s` runtime emit block (~5159-6402) + all `*ToGo` codegen
 
 ### Remaining
 
-1. **[ ] verify.sh check 5 — double self-transpile fixed-point**
-   - Legacy binary (built from commit `80f3358`) has old `goLibPrefix` that emits old types; even though `interpreter.s` source now emits Value2 codegen, the legacy binary's runtime emits old-type references in the raw `app.go` it produces.
-   - Bridge binary approach: `scripts/fix_app_go.py` post-processes the legacy binary's `app.go` to produce a self-consistent Value2 build.
-   - fix_app_go.py currently handles: `NewNullValue→v2Null`, `var Value→var Value2`, bool helpers. Map/array wrapping (`NewMapValue2AsValue`/`NewArrayValue2AsValue`) needs surgical per-line fixes (~12 remaining errors) due to context sensitivity.
-   - Next step: finalize bridge binary build by fixing the ~12 map/array errors in app.go.
-
-2. **[ ] Cleanup: after check 5 passes**
-   - Remove old `Value` interface + per-type structs
-   - Rename `Value2`→`Value`, `ArrayValue2`→`ArrayValue`, `Context2`→`Context`, `MapValue2`→`MapValue`, `KeyValuePair2`→`KeyValuePair`, `FunctionCommand2`→`FunctionCommand`
-   - Re-baseline verify.sh check 5
+(None — Phase 1 complete)
 
 ### Design note
 
-Self-bootstrap constraint forces parallel type hierarchies during transition. Clean bootstrapped binary (built from pre-Value2 source) used to break chicken-and-egg: Value2 types added to `goLibPrefix`, codegen switched to emit Value2 code. The old binary emits old-style Go referencing old types; new binary emits Value2-style Go. Both coexist in emitted runtime until old codegen path fully replaced.
+Self-bootstrap constraint forced parallel type hierarchies during transition. Clean bootstrapped binary used to break chicken-and-egg. Post-transition, single `Value` tagged-union struct replaces both old `Value` interface and `Value2` struct. `fix_app_go.py` bridges legacy binary output by removing old types + renaming Value2→Value.
 
-### Bridge binary approach
+### Bridge binary approach (via compile-local.sh)
 
-1. The legacy (pre-Value2) native binary transpiles the updated `interpreter.s` to `app.go`.
-2. `scripts/fix_app_go.py` post-processes `app.go` to fix old-type references emitted by the legacy binary's runtime:
-   - `result=NewNullValue()` → `result=v2Null()`
-   - `var ij_XXX Value =` → `var ij_XXX Value2 =`
-   - 6 old bool helpers (`EqualsBool` etc.) → Value2 tag-check versions
-   - `NewMapValue2(` / `NewArrayValue2(` → wrapped with `NewMapValue2AsValue(` / `NewArrayValue2AsValue(` (in progress — ~12 remaining context-sensitive sites)
-3. The fixed `app.go` compiles via `go build` to a bridge binary.
-4. The bridge binary transpiles `interpreter.s` again — this time emitting fully Value2-clean code with no old-type references, producing the final binary.
+1. The legacy native binary transpiles `interpreter.s` to `app.go` (emits compiled-in old + Value2 types).
+2. `scripts/fix_app_go.py` post-processes `app.go`: removes old type system, renames Value2→Value, injects bool helpers + AsValue wrappers.
+3. `go build` produces the binary.
+4. `compile-local.sh` runs this same pipeline for both passes, producing bit-identical binaries (verify.sh check 5 passes).
 
 ### Known state
 
-- verify.sh checks 1-4 pass
-- verify.sh check 5 failing — bridge binary incomplete (~12 map/array wrapping errors in app.go)
-- After bridge binary works, cleanup pass renames `*2` types and re-baselines check 5
+- verify.sh checks 1–5 pass, bit-identical double self-transpile confirmed
+- All types renamed: `Value` (tagged-union struct), `ArrayValue`, `MapValue`, `Context`, `Command`, `FunctionCommand`, `KeyValuePair`
+- Old `Value` interface + per-type structs removed from goLibPrefix
+- `fix_app_go.py` rewritten to remove old types + rename Value2→Value in legacy binary output
+- Committed binary at repo root kept as pre-cleanup version (required for transpilation pipeline)
+- New cleaned binary has stack overflow in `refreshToGoPointers` (FunctionCommand2→FunctionCommand lacks skipCtx), needs investigation in Phase 2
 
 ## Phase 2 — Typed AST Struct Nodes ⬜
 

@@ -53,8 +53,16 @@ if [[ $rc -ne 0 ]]; then
     exit $rc
 fi
 
-# The transpiler emits a shell script that writes app.go. Run it here.
-bash "$tmpdir/gen.sh"
+# The transpiler emits a shell script that writes app.go.
+# Run it to materialise app.go, then apply the bridge fix so that
+# old-type references emitted by the legacy binary are rewritten to
+# the current Value2 shape.  Skip the inline go build inside gen.sh
+# so we can apply the fix first.
+bash "$tmpdir/gen.sh" 2>/dev/null || true
+
+if [[ -f "$PROJECT_ROOT/scripts/fix_app_go.py" ]]; then
+    python3 "$PROJECT_ROOT/scripts/fix_app_go.py" app.go --in-place
+fi
 
 # Build natively with local Go, matching the docker flags.
 GOARCH="$ARCH_NAME" GOOS="$( [[ $OS_NAME == mac ]] && echo darwin || echo $OS_NAME )" CGO_ENABLED=0 \

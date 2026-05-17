@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Bridge post-processor: fix old-type references in app.go emitted by the legacy
-pre-Value2 native binary.  The script is idempotent — running it twice is safe.
+pre-cleanup native binary. Rewrites old type system + Value2 -> clean Value.
+
+The legacy binary emits its compiled-in goLibPrefix which has BOTH:
+  - Old Value interface + per-type structs (NullValue, IntValue, ...)
+  - Value2 tagged-union struct + helpers
+  - Old registerLibraryFunctions (uses *Context, *ArrayValue, Value interface)
+  - registerLibraryFunctions2 (uses *Context2, *ArrayValue2, Value2)
+
+This script removes the old type system and renames Value2->Value everywhere.
 
 Usage: python3 scripts/fix_app_go.py app.go [--in-place]
 """
@@ -10,114 +18,182 @@ import sys
 
 
 def fix_app_go(content: str) -> str:
-    # 1. result=NewNullValue() -> result=v2Null()
-    content = content.replace("result=NewNullValue()", "result=v2Null()")
+    # === STEP 1: Remove old registerLibraryFunctions ===
+    # Find "func registerLibraryFunctions(ctx *Context)" (uses IntValue, etc.)
+    old_rlf_start = content.find("\nfunc registerLibraryFunctions(ctx *Context) {")
+    # Find the closing "}" of this function — it's followed by counter vars
+    old_rlf_end_marker = "\nvar ijCountNewContext uint64\n"
+    old_rlf_end = content.find(old_rlf_end_marker)
+    if old_rlf_start != -1 and old_rlf_end != -1:
+        content = content[:old_rlf_start] + content[old_rlf_end:]
+        print("  Removed old registerLibraryFunctions")
 
-    # 2. var ij_XXX Value = -> var ij_XXX Value2 =
-    content = re.sub(r"var (ij_\w+) Value =", r"var \1 Value2 =", content)
+    # === STEP 2: Remove old type system ===
+    # Remove everything from "type Value interface {" to just before "func main() {"
+    old_types_start = content.find("\ntype Value interface {")
+    # The counter vars, old Context type, old Command/FunctionCommand, old Value interface,
+    # old per-type structs, old bool helpers, old NullValue — all sit between the
+    # end of Value2 helpers and main().
+    # We remove from the FIRST old-type marker after Value2 section to just before main().
+    # The old Context/Command/FunctionCommand sits just after counter vars and before
+    # the new registerLibraryFunctions2.
 
-    # 3. Replace old bool helpers (Value interface) with Value2 versions.
-    # The raw goLibPrefix output uses NO indentation (just newlines).
-    bool_subs = [
-        (
-            "func EqualsBool(a, b Value) bool {\n"
-            "if ai, ok := a.(IntValue); ok { if bi, ok := b.(IntValue); ok { return ai.val == bi.val } }\n"
-            "if as, ok := a.(StringValue); ok { if bs, ok := b.(StringValue); ok { return as.val == bs.val } }\n"
-            "return a.Equals(b).(BoolValue).val\n"
-            "}",
-            "func EqualsBool(a, b Value2) bool {\n"
-            "if a.tag != b.tag { return false }\n"
-            "switch a.tag {\n"
-            "case t2Int: return a.i == b.i\n"
-            "case t2Double: return a.d == b.d\n"
-            "case t2String: return a.s == b.s\n"
-            "case t2Bool: return a.b == b.b\n"
-            "case t2Null: return true\n"
-            "}\n"
-            "return false\n"
-            "}",
-        ),
-        (
-            "func NotEqualsBool(a, b Value) bool {\n"
-            "if ai, ok := a.(IntValue); ok { if bi, ok := b.(IntValue); ok { return ai.val != bi.val } }\n"
-            "if as, ok := a.(StringValue); ok { if bs, ok := b.(StringValue); ok { return as.val != bs.val } }\n"
-            "return !a.Equals(b).(BoolValue).val\n"
-            "}",
-            "func NotEqualsBool(a, b Value2) bool { return !EqualsBool(a, b) }",
-        ),
-        (
-            "func LessThanBool(a, b Value) bool {\n"
-            "if ai, ok := a.(IntValue); ok { if bi, ok := b.(IntValue); ok { return ai.val < bi.val } }\n"
-            "return a.LessThan(b).(BoolValue).val\n"
-            "}",
-            "func LessThanBool(a, b Value2) bool {\n"
-            "if a.tag == t2Int && b.tag == t2Int { return a.i < b.i }\n"
-            "if a.tag == t2Double && b.tag == t2Double { return a.d < b.d }\n"
-            "return a.LessThan(b).b\n"
-            "}",
-        ),
-        (
-            "func LessThanEqualBool(a, b Value) bool {\n"
-            "if ai, ok := a.(IntValue); ok { if bi, ok := b.(IntValue); ok { return ai.val <= bi.val } }\n"
-            "return a.LessThanEqual(b).(BoolValue).val\n"
-            "}",
-            "func LessThanEqualBool(a, b Value2) bool {\n"
-            "if a.tag == t2Int && b.tag == t2Int { return a.i <= b.i }\n"
-            "if a.tag == t2Double && b.tag == t2Double { return a.d <= b.d }\n"
-            "return a.LessThanEqual(b).b\n"
-            "}",
-        ),
-        (
-            "func BiggerThanBool(a, b Value) bool {\n"
-            "if ai, ok := a.(IntValue); ok { if bi, ok := b.(IntValue); ok { return ai.val > bi.val } }\n"
-            "return a.BiggerThan(b).(BoolValue).val\n"
-            "}",
-            "func BiggerThanBool(a, b Value2) bool {\n"
-            "if a.tag == t2Int && b.tag == t2Int { return a.i > b.i }\n"
-            "if a.tag == t2Double && b.tag == t2Double { return a.d > b.d }\n"
-            "return a.BiggerThan(b).b\n"
-            "}",
-        ),
-        (
-            "func BiggerThanEqualBool(a, b Value) bool {\n"
-            "if ai, ok := a.(IntValue); ok { if bi, ok := b.(IntValue); ok { return ai.val >= bi.val } }\n"
-            "return a.BiggerThanEqual(b).(BoolValue).val\n"
-            "}",
-            "func BiggerThanEqualBool(a, b Value2) bool {\n"
-            "if a.tag == t2Int && b.tag == t2Int { return a.i >= b.i }\n"
-            "if a.tag == t2Double && b.tag == t2Double { return a.d >= b.d }\n"
-            "return a.BiggerThanEqual(b).b\n"
-            "}",
-        ),
+    # First, remove old Context/Command/FunctionCommand block (between counter vars
+    # and registerLibraryFunctions2). The old Context has "inlineLen" field.
+    old_ctx_start = content.find("\ntype Context struct {\nparent    *Context\nvariables map[string]Value\ninlineLen int")
+    if old_ctx_start != -1:
+        # Find the next occurrence of "func registerLibraryFunctions2"
+        rlf2_marker = "\nfunc registerLibraryFunctions2(ctx2 *Context2) {"
+        rlf2_idx = content.find(rlf2_marker, old_ctx_start)
+        if rlf2_idx != -1:
+            content = content[:old_ctx_start] + content[rlf2_idx:]
+            print("  Removed old Context/Command/FunctionCommand block")
+
+    # Now remove old Value interface through NullValue
+    old_types_start = content.find("\ntype Value interface {")
+    main_marker = "\nfunc main() {"
+    main_idx = content.find(main_marker)
+    if old_types_start != -1 and main_idx != -1 and old_types_start < main_idx:
+        content = content[:old_types_start] + content[main_idx:]
+        print("  Removed old Value interface + per-type structs")
+
+    # === STEP 3: Rename Value2 -> Value everywhere ===
+    renames = [
+        ("NewStaticFunctionCommand2", "NewStaticFunctionCommand"),
+        ("FunctionCommand2", "FunctionCommand"),
+        ("KeyValuePair2", "KeyValuePair"),
+        ("ArrayValue2", "ArrayValue"),
+        ("MapValue2", "MapValue"),
+        ("Context2", "Context"),
+        ("Command2", "Command"),
+        ("Value2", "Value"),
+        ("registerLibraryFunctions2", "registerLibraryFunctions"),
+        ("NewContext2", "NewContext"),
+        ("v2Null", "vNull"),
+        ("v2Bool", "vBool"),
+        ("v2Int", "vInt"),
+        ("v2Double", "vDouble"),
+        ("v2String", "vString"),
+        ("v2Array", "vArray"),
+        ("v2Map", "vMap"),
+        ("v2Func", "vFunc"),
+        ("v2Invalid", "vInvalid"),
+        ("t2Null", "tNull"),
+        ("t2Int", "tInt"),
+        ("t2Double", "tDouble"),
+        ("t2String", "tString"),
+        ("t2Bool", "tBool"),
+        ("t2Array", "tArray"),
+        ("t2Map", "tMap"),
+        ("t2Func", "tFunc"),
+        ("t2Named", "tNamed"),
+        ("t2Invalid", "tInvalid"),
+        ("ctx2", "ctx"),
     ]
-    for old, new in bool_subs:
-        if old in content:
-            content = content.replace(old, new)
+    for old, new in renames:
+        content = content.replace(old, new)
 
-    # 4. Add wrapper functions before func main()
-    wrappers = (
-        "func NewMapValue2AsValue(pairs ...KeyValuePair2) Value2 {\n"
-        "\treturn Value2{tag: t2Map, m: NewMapValue2(pairs...)}\n"
+    print("  Renamed Value2->Value and related types")
+
+    # === STEP 4: Add bool helpers before main() (unconditional — old ones removed) ===
+    bool_helpers = (
+        "// --- bool helpers (Value tagged-union) ---\n"
+        "func EqualsBool(a, b Value) bool {\n"
+        "if a.tag != b.tag { return false }\n"
+        "switch a.tag {\n"
+        "case tInt: return a.i == b.i\n"
+        "case tDouble: return a.d == b.d\n"
+        "case tString: return a.s == b.s\n"
+        "case tBool: return a.b == b.b\n"
+        "case tNull: return true\n"
         "}\n"
-        "func NewArrayValue2AsValue(elements ...Value2) Value2 {\n"
-        "\treturn Value2{tag: t2Array, arr: NewArrayValue2(elements...)}\n"
+        "return false\n"
+        "}\n"
+        "func NotEqualsBool(a, b Value) bool { return !EqualsBool(a, b) }\n"
+        "func LessThanBool(a, b Value) bool {\n"
+        "if a.tag == tInt && b.tag == tInt { return a.i < b.i }\n"
+        "if a.tag == tDouble && b.tag == tDouble { return a.d < b.d }\n"
+        "return a.LessThan(b).b\n"
+        "}\n"
+        "func LessThanEqualBool(a, b Value) bool {\n"
+        "if a.tag == tInt && b.tag == tInt { return a.i <= b.i }\n"
+        "if a.tag == tDouble && b.tag == tDouble { return a.d <= b.d }\n"
+        "return a.LessThanEqual(b).b\n"
+        "}\n"
+        "func BiggerThanBool(a, b Value) bool {\n"
+        "if a.tag == tInt && b.tag == tInt { return a.i > b.i }\n"
+        "if a.tag == tDouble && b.tag == tDouble { return a.d > b.d }\n"
+        "return a.BiggerThan(b).b\n"
+        "}\n"
+        "func BiggerThanEqualBool(a, b Value) bool {\n"
+        "if a.tag == tInt && b.tag == tInt { return a.i >= b.i }\n"
+        "if a.tag == tDouble && b.tag == tDouble { return a.d >= b.d }\n"
+        "return a.BiggerThanEqual(b).b\n"
+        "}\n\n"
+    )
+
+    # === STEP 5: Add AsValue wrappers + bool helpers before main() ===
+    wrappers = (
+        "func NewMapValueAsValue(pairs ...KeyValuePair) Value {\n"
+        "\treturn Value{tag: tMap, m: NewMapValue(pairs...)}\n"
+        "}\n"
+        "func NewArrayValueAsValue(elements ...Value) Value {\n"
+        "\treturn Value{tag: tArray, arr: NewArrayValue(elements...)}\n"
         "}\n\n"
     )
     content = content.replace(
-        "\nfunc main() {", "\n" + wrappers + "func main() {"
+        "\nfunc main() {", "\n" + bool_helpers + wrappers + "func main() {"
     )
 
-    # 5-6. Replace map/array constructors in Value2-typed variable assignments
-    content = re.sub(
-        r"(var ij_\w+ Value2 = )NewMapValue2\(",
-        r"\1NewMapValue2AsValue(",
-        content,
+    # === STEP 6: Split at main() — rewrite body only ===
+    idx = content.find("\nfunc main() {")
+    if idx == -1:
+        return content
+    preamble = content[:idx]
+    body = content[idx:]
+
+    # In body: NewMapValue -> NewMapValueAsValue
+    body = re.sub(r"NewMapValue\(", "NewMapValueAsValue(", body)
+
+    # NewArrayValue -> NewArrayValueAsValue, then restore inside Execute
+    body = re.sub(r"NewArrayValue\(", "NewArrayValueAsValue(", body)
+    body = body.replace(
+        "Execute(ctx, NewArrayValueAsValue(",
+        "Execute(ctx, NewArrayValue(",
     )
-    content = re.sub(
-        r"(var ij_\w+ Value2 = )NewArrayValue2\(",
-        r"\1NewArrayValue2AsValue(",
-        content,
+
+    # Fix result=NewNullValue() -> result=vNull()
+    body = body.replace("result=NewNullValue()", "result=vNull()")
+
+    # Fix remaining var X Value = declarations
+    body = re.sub(r"\bvar (\w+) Value =", r"var \1 Value =", body)
+
+    content = preamble + body
+
+    # === STEP 7: Fix specific issues ===
+    # 7a. ValueToOld stub returns nil — Value is now a struct
+    content = content.replace(
+        'func ValueToOld(v Value) Value { return nil }',
+        'func ValueToOld(v Value) Value { return Value{} }'
     )
+
+    # 7b. Fix main(): remove old context setup, avoid duplicate ctx declarations
+    # The old binary's main() has both ctx (old) and ctx2 (new) setups.
+    # After step 3 renames, ctx2 -> ctx, so we have duplicate ctx := NewContext(nil).
+    # Replace the duplicate block with a single setup.
+    content = content.replace(
+        'ctx := NewContext(nil)\n\tregisterLibraryFunctions(ctx)\n\tctx := NewContext(nil)\n\tregisterLibraryFunctions(ctx)',
+        'ctx := NewContext(nil)\n\tregisterLibraryFunctions(ctx)'
+    )
+    # Also handle the non-indented version (if tabs are spaces)
+    content = content.replace(
+        'ctx := NewContext(nil)\nregisterLibraryFunctions(ctx)\nctx := NewContext(nil)\nregisterLibraryFunctions(ctx)',
+        'ctx := NewContext(nil)\nregisterLibraryFunctions(ctx)'
+    )
+
+    # Remove duplicate blank lines that may result
+    while '\n\n\n' in content:
+        content = content.replace('\n\n\n', '\n\n')
 
     return content
 
