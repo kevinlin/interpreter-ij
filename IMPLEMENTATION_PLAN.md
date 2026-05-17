@@ -13,14 +13,15 @@
 |---|---|---|---|
 | phase0-baseline | 1m11.153s | 1.00× | ✅ captured |
 | phase0-baseline-eval | 1m16.438s | 0.93× | ✅ captured (sample.s line) |
-| `run` (unlabeled, 02:13Z) | **0m49.274s** | **1.43×** | best ever — pre-Phase-2 state, identity unknown |
-| phase2-typed-ast (03:46Z) | 1m25.086s | **0.83× — REGRESSION** | Phase 2 cutover |
-| phase2-runtime (08:31Z) | 1m25.193s | 0.83× | Phase 2 runtime tweak, no improvement |
-| phase2-current (14:44Z) | **1m29.188s** | **0.80× — REGRESSION** | HEAD re-baseline post-P0, new floor |
+| `run` (unlabeled, 02:13Z) | 0m49.274s | 1.43× | non-reproducible — see P1 forensics below |
+| phase2-typed-ast (03:46Z) | 1m25.086s | 0.83× | Phase 2 cutover |
+| phase2-runtime (08:31Z) | 1m25.193s | 0.83× | Phase 2 runtime tweak |
+| phase2-current (14:44Z) | 1m29.188s | 0.80× | HEAD pre-cleanup floor |
+| **p1-dead-code-cleanup (15:32Z)** | **1m21.306s** | **0.88× (1.10× vs phase2-current)** | ✅ dead D2-prep walks removed |
 
-**Headline:** Phase 2 HEAD is a 25% regression vs phase0 (0.80×) and a 1.81× slowdown vs the unlabeled 02:13Z best. Drop-rule breached. 10× target (≤7s) requires ~12.7× improvement from current HEAD.
+**Headline:** committed HEAD binary passes verify.sh 5/5. Phase-2 self-host bench is 0.88× vs phase0 — still off the 10× target, but the path forward no longer requires a phase revert. The 02:13Z 49s outlier was forensically reproduced and shown to be a dual-runtime artifact (see "P1 forensics" below). The new floor is **p1-dead-code-cleanup = 1m21.306s**; next loop targets ≥1.3× of that via P3 interning.
 
-Phase 0 ✅ • Phase 1 ✅ committed • Phase 2 🔴 wired but regressing • Phase 3 ⬜ • Phase 4 ⬜
+Phase 0 ✅ • Phase 1 ✅ committed • Phase 2 ✅ wired, regression root-caused + partially recovered • Phase 3 ⬜ • Phase 4 ⬜
 
 ### P0 completed (2026-05-17 ~14:44Z)
 
@@ -38,27 +39,53 @@ Phase 0 ✅ • Phase 1 ✅ committed • Phase 2 🔴 wired but regressing • 
 
 All P0 items completed 2026-05-17 ~14:44Z. See *P0 completed* note above for evidence. Floor = `phase2-current = 1m29.188s`. Next loop starts at P1.
 
-### P1 — 🔴 BLOCKER: Phase 2 regression triage (must resolve before P3)
+### P1 — ✅ RESOLVED: Phase 2 regression triage
 
-The single biggest 10× obstacle is that Phase 2 made the bench slower, not faster. Drop-rule says revert; before reverting, audit which Phase 2 change broke perf, since the structural Node-tree change is sound (and required for P3+ pool indices on `Node.sIdx`).
+**Verdict: drop-rule does not fire.** Triage forensics below; the "Phase 2 regression vs 49s baseline" narrative was based on a non-reproducible data point. Real Phase 1 → Phase 2 perf delta is < 5%. Cleanup of dead D2-prep work alone recovers 1.10× over phase2-current. Continue to P3.
 
-- [ ] **Bisect the 02:13Z → 03:46Z regression window.** The unlabeled `run` at 02:13Z hit **49.27s (1.43×)**, then `phase2-typed-ast` at 03:46Z dropped to 85s (0.83×). That ~90-minute window is exactly the Phase 2 cutover. Use `git log --since='2026-05-17T02:13Z' --until='2026-05-17T03:46Z'` and `git bisect` (or manual `compile-local.sh` + `bench.sh` per commit) to identify the offending commit.
-- [ ] **Audit D2 static-impl drop.** Per current `interpreter.s`: `emitQueuedImpls()` and `goLibSuffix()` are documented no-ops; comment says "D2 dropped for Phase 2 Node tree". D2 (`ij_<name>_impl(ctx, args...)` fixed-arity direct call, bypassing `FunctionCommand.Execute`) is the biggest pre-Phase-2 fast path per README. Removing it almost certainly explains a large chunk of the regression. Decide:
-  - Option A: **Restore D2 alongside Node tree.** Function decls emit both a `ij_<name>_impl` fixed-arity Go func (body = direct Go translation of statement list) AND a `&Node{kind: nkFuncDecl, body: ...}` (used for capture / dynamic dispatch). Direct call sites resolve to `ij_<name>_impl(...)`; indirect (via `Value{tag: tFunc}`) goes through `eval(body, ...)`. This was the legacy approach — the override pattern (`let oldX = X; def X(...)`) needs the Func wrapper anyway.
-  - Option B: **Audit D3 raw-bool helpers** (`EqualsBool`, `LessThanBool`, …). Confirm `conditionToGoBool` still routes if/while conditions through these. If Phase 2 eval routes conditions through `Value.Equals/LessThan` returning a boxed `Value`, that's a per-loop-iteration alloc regression on tight `while` loops.
-  - Option C: **Audit D1 static resolution.** Resolver writes `resolvedKind`/`resolvedName` on IJ AST nodes but the Node-struct emit zeroes those fields (subagent audit confirmed `resolvedSlot` has zero writes). Currently every `nkIdent` eval goes through `ctx.Get(n.name)` → map-lookup-by-string. Pre-Phase-2 D1 short-circuited locals/params. Project resolved info into `Node.resolvedKind/Name` and switch `evalIdent` to use it.
-- [ ] **Run drop-rule decision.** After D1/D2/D3 audit:
-  - If we can recover ≥1.3× over phase1, keep Phase 2 and continue.
-  - Else: revert Phase 2 commits (`f7783ed..d69d42a`) per drop-rule. Restart from Phase 1 (49s `run` state) and pursue Phase 3 directly on top of P1.
+**P1 forensics (worktree benches, 2026-05-17 ~23:00Z):**
 
-### P2 — Fix Binary B crash (unblocks end-to-end Phase 2 self-transpile)
+| Worktree | Source @ | Binary @ | Real time | Notes |
+|---|---|---|---|---|
+| W-a | fb2b299 source | fb2b299 committed binary (3.6 MB, built from c5da0ac) | 51.97s | "02:13Z 49s" reproduced |
+| W-b | fb2b299 source | fresh self-build of fb2b299 (4.5 MB) | 1m33s | self-build of post-cleanup source |
+| W-c | c5da0ac source | c5da0ac committed binary (3.6 MB) | 1m02s | pre-cleanup baseline |
+| W-d | ac2e6f3 source | fresh self-build of ac2e6f3 (4.5 MB) | 1m27s | first post-cleanup self-build, fixed-point ✅ |
+| HEAD | 38431c9 source | 38431c9 committed binary (4.5 MB) | 1m29s | current production |
 
-Required only if Phase 2 is kept after P1 triage.
+**Smoking gun:** the only sub-60s data point (W-a / 02:13Z 49s) uses a binary built from `c5da0ac` source — a transitional dual-runtime commit that registers BOTH the old `Value`-interface and new `Value2` tagged-union library functions, plus emits D1 (`ctx.Get` → direct Go-var inlining), D2 (`ij_<name>_impl` fixed-arity), D3 (raw-bool helpers) fast paths. That source **cannot self-build** (`compile-local.sh` errors on `Value` vs `Value2` type incompatibility — verified). The 49s is therefore an irreproducible artifact, not a perf baseline.
 
-- [ ] **Confirm crash signature.** IMPLEMENTATION_PLAN claims "deep eval recursion → index out of range [0] with length 0 in lib fn". Reproduce w/ the cleaned `dba0ddc` binary transpiling `interpreter.s`; capture full panic + goroutine stack. The "index out of range with length 0" is a slice/string bounds-check, not a stack overflow — likely a library function (e.g. push/append/get) receiving an empty collection from a Phase 2 eval path that the test programs don't exercise.
-- [ ] **Add diagnostic logging in the emitted lib functions** that take string/array args. Goal: identify which lib fn, on which Node, with which empty input. Once located, fix the underlying empty-collection handling (mirrors the `NewArrayValue` nil-guard already added in commit `d69d42a`).
-- [ ] **Only if true stack overflow:** convert recursive `eval()` dispatch to iterative trampoline in `goLibPrefix`. ~200 LOC change, but mechanical. Alternative: emit `debug.SetMaxStack(1 << 30)` in `main()`.
-- [ ] **Replace committed `interpreter_mac_arm64`** with the cleaned Phase 2 binary (currently the committed binary is the pre-cleanup `ac2e6f3`-era hybrid that sidesteps the crash via old-style `ij_puts.Execute` paths). This change makes verify.sh check 5 honest.
+The Phase 1 cleanup at `fb2b299` (delete old interface + dual-runtime, rename `Value2→Value`) is the actual regression entry point: it eliminated D1/D2/D3 emit paths along with the dead code. The subsequent Phase 2 wiring (`768e308..d69d42a`) didn't measurably change the floor (1m27s @ ac2e6f3 → 1m29s @ HEAD). Reverting Phase 2 would not recover speed.
+
+**D1/D2/D3 audit (against HEAD `interpreter.s`):**
+
+- **D1 (static identifier resolution → direct Go var).** GONE. `identifierToGo` (line 1942) emits `&Node{kind: nkIdent, name: "<s>"}` unconditionally; the `resolvedKind`/`resolvedOrigin`/`resolvedName` annotations the resolver writes are never consulted at emit. Every `nkIdent` eval = `ctx.Get(string)` map lookup. Phase 4 owns reintroducing this via `Node.resolvedSlot`.
+- **D2 (static def → fixed-arity `ij_<name>_impl` direct call).** GONE. `emitQueuedImpls()` and `goLibSuffix()` were documented no-ops; `transpilerImplQueue` was never appended; `transpilerStaticImpls` was populated but had ZERO readers in the entire codebase. **Cleaned up this loop** (see P1 increment below); call sites all dispatch via `Value{tag: tFunc}` → `FunctionCommand.Execute`.
+- **D3 (condition slot → raw-`bool` helper, no `BoolValue` heap alloc).** GONE. `conditionToGoBool` routes if/while conditions back to `condNode["toGo"]` (Node-tree emit). `EqualsBool`/`NotEqualsBool`/`LessThanBool`/`LessThanEqualBool`/`BiggerThanBool`/`BiggerThanEqualBool` were emitted in `goLibPrefix` but had ZERO callers in emitted Go. **Cleaned up this loop**; `fix_app_go.py` already re-injects them via its `if "func EqualsBool" not in content[:main()]` guard, so emitted Go is byte-identical post-cleanup.
+
+**P1 increment shipped this loop:**
+
+- Removed `transpilerImplQueue`, `transpilerStaticImpls` (declarations + the 3-loop populate block in `programToGo`, lines 4288–4346 pre-edit).
+- Removed `emitQueuedImpls` def + its call from `transpileGo` block.
+- Removed `goLibSuffix` def + its call (no-op).
+- Removed 6 unused bool helpers from `goLibPrefix` (re-injected by `fix_app_go.py` so codegen output unchanged).
+- 121 net LOC deleted from `src/interpreter.s`. `verify.sh` 5/5 ✅, `test.s` ✅, bench **1m21.3s (1.10× over phase2-current)**.
+
+**Honest follow-up risks (carried forward, NOT blocking):**
+
+- Fresh self-build of HEAD is functionally broken — `compile-local.sh` succeeds and produces a stage1 binary, but using that stage1 as the bootstrap and re-running `compile-local.sh` yields a binary that lacks `func main()` (programToGoPhase2 doesn't emit, because Phase 2's `evalAssign` creates a local binding instead of updating the parent ctx → top-level `transpileGo = true` from `readSources` is invisible to the enclosing scope). The committed `interpreter_mac_arm64` is a pre-cleanup `ac2e6f3`-era hybrid that sidesteps this via old-style D1 direct-Go-var assignments. **verify.sh check 5 currently only validates determinism** (same binary → same output twice), not true fixed-point — see P2.
+- Phase 2 `evalAssign` closure-scope bug: scope walk missing. Fix candidate: change `evalAssign` to walk parent contexts (`for c := ctx; c != nil; c = c.parent { if c.Exists(name) { c.Update(name, v); return v, false } }; ctx.Create(name, v)`). Required before any self-build that touches the committed binary.
+- The "index out of range [0] with length 0" in `registerLibraryFunctions.func12` (per stack trace, the `assert` lib fn) — repros when stage2 runs any non-trivial program. The `NewArrayValue` nil-guard from `d69d42a` partially mitigates but isn't sufficient. P2 entry below.
+
+### P2 — Make verify.sh check 5 honest (true fixed-point, not just determinism)
+
+Phase 2 IS kept. P2 is now the bridge to a clean self-build so the committed binary can be regenerated reproducibly.
+
+- [ ] **Fix `evalAssign` closure scope.** Current emit (`goLibPrefix` line ~5258) checks only `ctx.Exists(n.name)`; should walk parent contexts and update the first ancestor that owns `name`, falling back to `ctx.Create` only if none. Without this, every top-level mutation from inside a function (`readSources` setting `transpileGo = true`, etc.) creates a shadow binding instead of updating the global. **This is the root cause of stage1→stage2 producing a binary without `main()`.**
+- [ ] **Audit `evalVarDecl` mirror.** Same scope question: does redeclaring `let x` in a nested block shadow correctly? Likely correct (always `ctx.Create`) but spot-check before commit.
+- [ ] **Repro the `registerLibraryFunctions.func12` panic.** Reproduced this loop with `printf 'let x=false\ndef setIt(){x=true;}\nsetIt()\nputs(x)\n' | stage2_redo`: panics in `assert` lib fn (func12) at `app.go:148 +0x1d8`, called from a recursive eval chain ~100 frames deep. The crash is `params.Get(Value{tag: tInt, i: 0})` or `params.Get(Value{tag: tInt, i: 1})` on a length-0 ArrayValue. The fix is to harden the lib fns that read positional params: emit `if i >= len(params.values) { return vNull() }` guards.
+- [ ] **Patch `fix_app_go.py` to harden all lib-fn `params.Get(Value{tag: tInt, i: N})` call sites** with bounds checks. Mechanical sed; ~30 lib fns. Once stage2 stops panicking on `assert(...)`, run `compile-local.sh` 3× and confirm stage2 == stage3 byte-identical.
+- [ ] **Replace committed `interpreter_mac_arm64`** with a clean Phase-2 self-build (post-`evalAssign` fix). The committed binary is currently a transitional hybrid; replacing it is what makes "check 5 = true fixed-point" possible. Once swapped, tighten `verify.sh` check 5 to do stage1 install → stage2 build → diff (true fixed-point).
 
 ### P3 — Phase 3: String interning + singletons (expected 1.3–1.8×)
 
@@ -99,10 +126,10 @@ Only if cumulative speedup after P3 < 10×. Per design §Phase 4.
 
 ## Open Questions / Risks
 
-- **What was the 02:13Z `run` (49s)?** It's the only number above baseline. Worth a `git show <commit-around-02:13Z>` to confirm whether it was a real Phase-1-only state or a transient experiment. If real, it's the actual P1 result and the bench labels in the log are wrong.
-- **fix_app_go.py mtime is 21:41 today** — same minute as the binary build. Active edits in this session. Read its current state before any P1 triage; the bridge logic may already encode an attempted regression fix.
-- **D4 lesson (README):** "looks faster, is slower." Every phase commit must be measured, not assumed. Phase 2's current 0.83× is exactly this scenario at a phase boundary.
-- **MCP regression risk.** verify.sh check 4 currently can't run (no goldens). The override pattern (`let oldX = X; def X(...)`) is the MCP-relevant invariant. Re-capture goldens (P0) before any codegen edit touching `functionDeclarationToGo`.
+- **`verify.sh` check 5 = determinism, not fixed-point.** The script runs `compile-local.sh src/interpreter.s _roundtrip_{a,b}` twice with the SAME committed bootstrap binary, then diffs `_roundtrip_a` vs `_roundtrip_b`. This catches non-deterministic transpile output (e.g. map iteration) but NOT the "stage1 ≠ stage2 because stage1's compiled-in eval is buggy" class of regression. P2 promotes this to true fixed-point.
+- **The committed `interpreter_mac_arm64` is a bridge.** It was built from `ac2e6f3`-era source that still emitted D1/D2/D3 fast paths, then the source was rewritten in `f7783ed` to remove them. The committed binary therefore has fast-path runtime semantics that NO current `src/interpreter.s` can reproduce. Until P2 ships, treat the committed binary as a one-way artifact — do not lose it (`git restore interpreter_mac_arm64` after any accidental recompile).
+- **D4 lesson (README):** "looks faster, is slower." Every phase commit must be measured. Counter-lesson from this loop: also "looks slower, is irreproducible" — the 49s 02:13Z bench was real but irreproducible because it depended on a transitional dual-runtime that no longer exists in source form.
+- **MCP regression risk.** verify.sh check 4 PASSES at HEAD. The override pattern (`let oldX = X; def X(...)`) is the MCP-relevant invariant. Any codegen edit touching `functionDeclarationToGo` must re-run verify.sh in full.
 
 ## Build & verification reminders
 

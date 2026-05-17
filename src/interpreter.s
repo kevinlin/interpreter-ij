@@ -1268,17 +1268,6 @@ def mangle(name) {
 
 let resolverScopeIdCounter = 0;
 
-// D2: queue of static top-level FunctionDeclaration AST nodes whose fixed-arity
-// Go `func ij_<name>_impl(...)` must be emitted AFTER main() closes (since Go
-// doesn't allow nested functions). Populated by functionDeclarationToGo during
-// the main() emission pass and drained by transpileGo after goLibSuffix.
-let transpilerImplQueue = [];
-
-// D2: map from IJ top-level def name -> parameter arity, for call sites to
-// decide whether they can emit a direct ij_<name>_impl(ctx, args...) call.
-// Populated lazily by functionDeclarationToGo.
-let transpilerStaticImpls = {};
-
 def makeResolverScope(parent, isFunctionScope) {
     let s = {};
     s["parent"] = parent;
@@ -1727,15 +1716,6 @@ def functionDeclarationToGo(self) {
 
     print('}');
 }
-
-// D2: drain transpilerImplQueue, emitting one package-level Go function per
-// queued static top-level def. Called after goLibSuffix so the impls live at
-// package scope.
-def emitQueuedImpls() {
-    // no-op: D2 dropped for Phase 2 Node tree
-}
-
-
 
 // NumberLiteral node constructor
 def makeNumberLiteral(value, position) {
@@ -4285,66 +4265,6 @@ def makeProgram() {
         let stmts = self["statements"];
         let n = len(stmts);
 
-        // D2: find the LAST top-level FunctionDeclaration index for each
-        // name. Duplicate top-level defs are legal in IJ (e.g.
-        // getTokenLiteral is declared twice in interpreter.s, and eval.s
-        // intentionally shadows library initializers). Only the LAST
-        // occurrence per name can legally use the shared ij_<name>_impl
-        // Go symbol; earlier occurrences are tagged so they fall back to
-        // the inline-wrapper emission path. Crucially, earlier wrappers
-        // must still be emitted so patterns like
-        //   let oldX = X; def X(...) { oldX(...); ... }
-        // capture the original function value.
-        let lastDefIndex = {};
-        let pi = 0;
-        while (pi < n) {
-            let pstmt = stmts[pi];
-            if (pstmt != null) {
-                if (pstmt["type"] == "FunctionDeclaration") {
-                    if (pstmt["resolvedAtRoot"] == true) {
-                        lastDefIndex[pstmt["name"]] = pi;
-                    }
-                }
-            }
-            pi = pi + 1;
-        }
-
-        // Tag each FunctionDeclaration with `resolvedIsLastAtRoot` so the
-        // emitter can decide whether the D2 impl path is legal for it.
-        let pk = 0;
-        while (pk < n) {
-            let pstmt = stmts[pk];
-            if (pstmt != null) {
-                if (pstmt["type"] == "FunctionDeclaration") {
-                    if (pstmt["resolvedAtRoot"] == true) {
-                        pstmt["resolvedIsLastAtRoot"] = (lastDefIndex[pstmt["name"]] == pk);
-                    }
-                }
-            }
-            pk = pk + 1;
-        }
-
-        // D2: pre-populate transpilerStaticImpls with the LAST static def's
-        // arity per name so call sites emitted before that def (including
-        // those inside deferred bodies) take the direct-call path. Only
-        // the LAST occurrence qualifies because only it owns ij_<name>_impl.
-        let pj = 0;
-        while (pj < n) {
-            let pstmt = stmts[pj];
-            if (pstmt != null) {
-                if (pstmt["type"] == "FunctionDeclaration") {
-                    if (pstmt["resolvedAtRoot"] == true) {
-                        if (pstmt["resolvedIsStatic"] == true) {
-                            if (pstmt["resolvedIsLastAtRoot"] == true) {
-                                transpilerStaticImpls[pstmt["name"]] = len(pstmt["parameters"]);
-                            }
-                        }
-                    }
-                }
-            }
-            pj = pj + 1;
-        }
-
         let i = 0;
         while (i < n) {
             let stmt = stmts[i];
@@ -5209,39 +5129,6 @@ puts("func NewStaticFunctionCommand(defCtx *Context, fn func(*Context, *ArrayVal
 puts("return &FunctionCommand{definitionCtx: defCtx, executeFunc: fn}");
 puts("}");
 puts("// --- end Value helpers ---");
-puts("// --- bool helpers (Value tagged-union) ---");
-puts("func EqualsBool(a, b Value) bool {");
-puts("if a.tag != b.tag { return false }");
-puts("switch a.tag {");
-puts("case tInt: return a.i == b.i");
-puts("case tDouble: return a.d == b.d");
-puts("case tString: return a.s == b.s");
-puts("case tBool: return a.b == b.b");
-puts("case tNull: return true");
-puts("}");
-puts("return false");
-puts("}");
-puts("func NotEqualsBool(a, b Value) bool { return !EqualsBool(a, b) }");
-puts("func LessThanBool(a, b Value) bool {");
-puts("if a.tag == tInt && b.tag == tInt { return a.i < b.i }");
-puts("if a.tag == tDouble && b.tag == tDouble { return a.d < b.d }");
-puts("return a.LessThan(b).b");
-puts("}");
-puts("func LessThanEqualBool(a, b Value) bool {");
-puts("if a.tag == tInt && b.tag == tInt { return a.i <= b.i }");
-puts("if a.tag == tDouble && b.tag == tDouble { return a.d <= b.d }");
-puts("return a.LessThanEqual(b).b");
-puts("}");
-puts("func BiggerThanBool(a, b Value) bool {");
-puts("if a.tag == tInt && b.tag == tInt { return a.i > b.i }");
-puts("if a.tag == tDouble && b.tag == tDouble { return a.d > b.d }");
-puts("return a.BiggerThan(b).b");
-puts("}");
-puts("func BiggerThanEqualBool(a, b Value) bool {");
-puts("if a.tag == tInt && b.tag == tInt { return a.i >= b.i }");
-puts("if a.tag == tDouble && b.tag == tDouble { return a.d >= b.d }");
-puts("return a.BiggerThanEqual(b).b");
-puts("}");
 puts("// --- Phase 2: Typed AST Node struct ---");
 puts("const (");
 puts("nkInfix uint8 = iota");
@@ -5497,9 +5384,6 @@ puts("");
 }
 
 
-def goLibSuffix() {
-// no-op: main() now emitted by programToGoPhase2
-}
 // Phase 2: Node tree program emitter — top-level def so refreshToGoPointers can rebind
 let useNodeTree = true;
 
@@ -6155,11 +6039,6 @@ if (transpileGo) {
     }
     interpreter["toGo"](interpreter);
     if (transpileGoFull) {
-        goLibSuffix();
-        // D2: drain the queue of static top-level defs, emitting each as a
-        // package-level ij_<name>_impl(...) fixed-arity Go function.
-        emitQueuedImpls();
-
         puts("EOX");
         puts("go build app.go");
     }
