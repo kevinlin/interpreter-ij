@@ -11,5 +11,9 @@ src/sort
 src/sort.s
 src/update.sh
 
+# scripts/mcp.sh writes these to repo root (cd $ROOT_DIR), not src/
+/interpreter_base.s
+/mcp_eval.s
+
 # Cursor
 .history/
