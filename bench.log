@@ -49,3 +49,36 @@ real	0m0.038s
 user	0m0.006s
 sys	0m0.011s
 -- selfhosted_interpreter.sh bench_eval.s --
+=== 2026-05-17T02:13:13Z label=run ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	0m49.274s
+user	2m8.282s
+sys	0m2.224s
+-- interpreter.sh test.s --
+
+real	0m0.521s
+user	0m0.987s
+sys	0m0.152s
+-- native_interpreter.sh src/test.s --
+
+real	0m0.030s
+user	0m0.008s
+sys	0m0.015s
+=== 2026-05-17T03:46:32Z label=phase2-typed-ast ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m25.086s
+user	2m25.983s
+sys	0m1.275s
+-- interpreter.sh test.s --
+
+real	0m0.637s
+user	0m0.851s
+sys	0m0.106s
+-- native_interpreter.sh src/test.s --
+
+real	0m0.022s
+user	0m0.007s
+sys	0m0.012s
+
