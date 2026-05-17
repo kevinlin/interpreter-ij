@@ -17,14 +17,33 @@ import re
 import sys
 
 
+def _replace_outside_strings(line: str, old: str, new: str) -> str:
+    """Replace `old` with `new` only when NOT inside a Go string literal ("...")."""
+    result = []
+    i = 0
+    in_string = False
+    while i < len(line):
+        if not in_string and line[i:i+len(old)] == old:
+            result.append(new)
+            i += len(old)
+        else:
+            if line[i] == '"' and (i == 0 or line[i-1] != '\\'):
+                in_string = not in_string
+            result.append(line[i])
+            i += 1
+    return ''.join(result)
+
+
 def fix_app_go(content: str) -> str:
     # === STEP 1: Remove old registerLibraryFunctions ===
-    # Find "func registerLibraryFunctions(ctx *Context)" (uses IntValue, etc.)
+    # The legacy binary emits counter vars AFTER old registerLibraryFunctions.
+    # In the cleaned fb2b299+ binary, counter vars come BEFORE the single
+    # registerLibraryFunctions. Only do the removal when counter vars follow
+    # registerLibraryFunctions (old layout); otherwise skip.
     old_rlf_start = content.find("\nfunc registerLibraryFunctions(ctx *Context) {")
-    # Find the closing "}" of this function — it's followed by counter vars
     old_rlf_end_marker = "\nvar ijCountNewContext uint64\n"
     old_rlf_end = content.find(old_rlf_end_marker)
-    if old_rlf_start != -1 and old_rlf_end != -1:
+    if old_rlf_start != -1 and old_rlf_end != -1 and old_rlf_end > old_rlf_start:
         content = content[:old_rlf_start] + content[old_rlf_end:]
         print("  Removed old registerLibraryFunctions")
 
@@ -133,6 +152,7 @@ def fix_app_go(content: str) -> str:
     )
 
     # === STEP 5: Add AsValue wrappers + bool helpers before main() ===
+    # Only add if not already present (new binary already has them).
     wrappers = (
         "func NewMapValueAsValue(pairs ...KeyValuePair) Value {\n"
         "\treturn Value{tag: tMap, m: NewMapValue(pairs...)}\n"
@@ -141,9 +161,16 @@ def fix_app_go(content: str) -> str:
         "\treturn Value{tag: tArray, arr: NewArrayValue(elements...)}\n"
         "}\n\n"
     )
-    content = content.replace(
-        "\nfunc main() {", "\n" + bool_helpers + wrappers + "func main() {"
-    )
+    # Only inject bool helpers if not already in the preamble
+    if "func EqualsBool(a, b Value) bool" not in content[:content.find("\nfunc main() {")]:
+        content = content.replace(
+            "\nfunc main() {", "\n" + bool_helpers + "func main() {"
+        )
+    # Only inject AsValue wrappers if not already present
+    if "func NewArrayValueAsValue" not in content[:content.find("\nfunc main() {")]:
+        content = content.replace(
+            "\nfunc main() {", "\n" + wrappers + "func main() {"
+        )
 
     # === STEP 6: Split at main() — rewrite body only ===
     idx = content.find("\nfunc main() {")
@@ -152,15 +179,26 @@ def fix_app_go(content: str) -> str:
     preamble = content[:idx]
     body = content[idx:]
 
-    # In body: NewMapValue -> NewMapValueAsValue
-    body = re.sub(r"NewMapValue\(", "NewMapValueAsValue(", body)
+    # Protect .Execute(ctx, NewArrayValue/NewMapValue) — these need *ArrayValue/*MapValue.
+    body = body.replace(".Execute(ctx, NewArrayValue(", ".Execute(ctx, __TMP_NEWARR__")
+    body = body.replace(".Execute(ctx, NewMapValue(", ".Execute(ctx, __TMP_NEWMAP__")
 
-    # NewArrayValue -> NewArrayValueAsValue, then restore inside Execute
-    body = re.sub(r"NewArrayValue\(", "NewArrayValueAsValue(", body)
-    body = body.replace(
-        "Execute(ctx, NewArrayValueAsValue(",
-        "Execute(ctx, NewArrayValue(",
-    )
+    # In body: NewMapValue -> NewMapValueAsValue.
+    # Process line-by-line, skipping occurrences inside Go string literals.
+    body_lines = body.split("\n")
+    for i, line in enumerate(body_lines):
+        body_lines[i] = _replace_outside_strings(line, "NewMapValue(", "NewMapValueAsValue(")
+    body = "\n".join(body_lines)
+
+    # NewArrayValue -> NewArrayValueAsValue.
+    body_lines = body.split("\n")
+    for i, line in enumerate(body_lines):
+        body_lines[i] = _replace_outside_strings(line, "NewArrayValue(", "NewArrayValueAsValue(")
+    body = "\n".join(body_lines)
+
+    # Restore protected Execute calls.
+    body = body.replace(".Execute(ctx, __TMP_NEWARR__", ".Execute(ctx, NewArrayValue(")
+    body = body.replace(".Execute(ctx, __TMP_NEWMAP__", ".Execute(ctx, NewMapValue(")
 
     # Fix result=NewNullValue() -> result=vNull()
     body = body.replace("result=NewNullValue()", "result=vNull()")

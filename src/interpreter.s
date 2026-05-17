@@ -68,23 +68,27 @@ def arrayLiteralToJson(self) {
 }
 
 def arrayLiteralToGo(self) {
-    print('&Node{kind: nkArrayLit, list: []*Node{');
+    // Go: NewArrayValue(StringValue{val: "x-"})
+    
+    print('NewArrayValue(');
 
     let elems = self["elements"];
     let n = len(elems);
     let i = 0;
     while (i < n) {
         if (i > 0) {
-            print(', ');
+            print(',');
         }
+        
         let element = elems[i];
         if (element["toGo"] != null) {
             element["toGo"](element);
         }
+
         i = i + 1
     }
 
-    print('}}');
+    print(')');
 }
 
 // Helper: join array of strings with ", "
@@ -485,11 +489,19 @@ def makeIndexExpression(collectionNode, indexNode, position) {
     node["toJson"] = toJson;
 
     def toGo(self) {
-        print('&Node{kind: nkIndex, left: ');
-        self["collection"]["toGo"](self["collection"]);
-        print(', right: ');
-        self["index"]["toGo"](self["index"]);
-        print('}');
+        // Go: params.Get(IntValue{val: 0})
+
+        if (self["collection"]["toGo"] != null) {
+            self["collection"]["toGo"](self["collection"])
+        }
+
+        print('.Get(');
+
+        if (node["index"]["toGo"] != null) {
+            node["index"]["toGo"](node["index"])
+        }
+
+        print(')');
     }
     node["toGo"] = toGo;
 
@@ -583,15 +595,15 @@ def ReturnStatement_toJson(self) {
 }
 
 def ReturnStatement_toGo(self) {
+    // Go: return 1
     puts("");
-    print('&Node{kind: nkReturn');
+    print("return ");
+
     if (self["value"] != null) {
-        print(', right: ');
         if (self["value"]["toGo"] != null) {
             self["value"]["toGo"](self["value"]);
         }
     }
-    print('}');
 }
 
 
@@ -653,13 +665,15 @@ def ReturnStatement_toGo(self) {
     def toGo(self) {
       // Go: for i < 3 { .. }
 
-      print('&Node{kind: nkWhileStmt, left: ');
-      self["condition"]["toGo"](self["condition"]);
-      print(', body: ');
+      print('for ');
+
+      conditionToGoBool(self["condition"]);
+
+      print(' ');
+
       if (self["body"]["toGo"] != null) {
         self["body"]["toGo"](self["body"]);
       }
-      print('}');
     }
     node["toGo"] = toGo;
 
@@ -728,15 +742,42 @@ def assignmentStatementToJson(self) {
 }
 
 def assignmentStatementToGo(self) {
-    print('&Node{kind: nkAssign, name: "' + self["name"] + '"');
-    if (self["resolvedKind"] != null) {
-        print(', resolvedKind: ' + intString(self["resolvedKind"]));
+    // Go: ctx.Update("i", IntValue{val: i})
+
+    // Static resolution: params (C3), function-local lets (C4) and
+    // library/top-level globals (C6/C7) assign to the underlying Go variable
+    // directly; other cases fall through to the ctx path.
+    let origin = self["resolvedOrigin"];
+    let kind = self["resolvedKind"];
+    let useGoVar = false;
+    let isGlobal = false;
+    if (origin == "param") { useGoVar = true; }
+    if (origin == "let") {
+        if (kind == "local" || kind == "captured") { useGoVar = true; }
     }
-    print(', right: ');
+    if (kind == "global") {
+        if (origin == "lib" || origin == "def" || origin == "let") {
+            useGoVar = true;
+            isGlobal = true;
+        }
+    }
+    if (useGoVar) {
+        print(self["resolvedName"] + ' = ');
+        if (self["value"]["toGo"] != null) {
+            self["value"]["toGo"](self["value"])
+        }
+        // Mirror globals back to ctx so dynamic access (ctx.Get from
+        // unresolved paths) stays coherent.
+        if (isGlobal) {
+            print('; ctx.Update("' + self["name"] + '", ' + self["resolvedName"] + ')');
+        }
+        return null;
+    }
+    print('ctx.Update("'+self["name"]+'", ');
     if (self["value"]["toGo"] != null) {
         self["value"]["toGo"](self["value"])
     }
-    print('}');
+    print(')');
     return null;
 }
 
@@ -802,11 +843,9 @@ def toGoJsonExpressionStatement(self) {
     if (expr == null) {
         return;
     }
-    print('&Node{kind: nkExprStmt, left: ');
     if (expr["toGo"] != null) {
         expr["toGo"](expr);
     }
-    print('}');
 }
 
 
@@ -843,7 +882,6 @@ def opCodeFor(op) {
     if (op == ">=") { return "opGte"; }
     if (op == "&&") { return "opAnd"; }
     if (op == "||") { return "opOr"; }
-    if (op == "!") { return "opNot"; }
     return "opAdd";
 }
 
@@ -889,19 +927,89 @@ def infixExpressionToJson(self) {
 }
 
 def infixExpressionToGo(self) {
-    print('&Node{kind: nkInfix, op: ' + opCodeFor(self["operator"]) + ', left: ');
+    // Go: val.Multiply(val2)
 
     if (self["left"]["toGo"] != null) {
         self["left"]["toGo"](self["left"]);
     }
-
-    print(', right: ');
+    
+    let op = self["operator"];
+    if (op == "==") {
+        print('.Equals(');
+    }
+    else {
+        if (op == "+") {
+            print('.Add(');
+        }
+        else {
+            if (op == "<") {
+                print('.LessThan(');
+            }
+            else {
+                if (op == "<=") {
+                    print('.LessThanEqual(');
+                }
+                else {
+                    if (op == ">=") {
+                        print('.BiggerThanEqual(');
+                    }    
+                    else {
+                        if (op == ">") {
+                            print('.BiggerThan(');
+                        } 
+                        else {
+                            if (op == "&&") {
+                                print('.And(');
+                            }
+                            else {
+                                if (op == "||") {
+                                    print('.Or(');
+                                }    
+                                else {
+                                    if (op == "*") {
+                                        print('.Multiply(');
+                                    }   
+                                    else {
+                                        if (op == "/") {
+                                            print('.Divide(');
+                                        }
+                                        else {
+                                            if (op == "-") {
+                                                print('.Subtract(');
+                                            }
+                                            else {
+                                                if (op == "!=") {
+                                                    print('.Equals(');
+                                                }
+                                                else {
+                                                    if (op == "%") {
+                                                        print('.Modulo(');
+                                                    }
+                                                    else {   
+                                                        print("/* FIXME infix  " + op + " */"); //GODEBUG 
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }   
+                    }
+                }
+            }
+        }
+    }
 
     if (self["right"]["toGo"] != null) {
         self["right"]["toGo"](self["right"]);
     }
 
-    print('}');
+    print(')');
+
+    if (op == "!=") {
+        print('.Not()');
+    }
 }
 
 
@@ -937,7 +1045,7 @@ def nullLiteralToJson(self) {
 }
 
 def nullLiteralToGo(self) {
-    print('&Node{kind: nkNullLit}');
+    print('vNull()');
 }
 
 
@@ -1101,19 +1209,71 @@ def blockStatementToGo(self) {
     let stmts = self["statements"];
     let n = len(stmts);
 
+    // Skip NewContext when this block has no declarations that still rely on
+    // ctx. After C4, `let` is emitted as a Go var and no longer needs ctx at
+    // all, so only nested `def` declarations (which still use ctx.Create) keep
+    // the block-local NewContext.
+    let hasLocal = false;
+    let j = 0;
+    while (j < n) {
+        let t = stmts[j]["type"];
+        if (t == "FunctionDeclaration") { hasLocal = true; }
+        j = j + 1;
+    }
+
     puts("{");
-    puts("_ = ctx");
+    if (hasLocal) {
+        puts("ctx := NewContext(ctx)");
+        puts('if ctx == nil {'); //dirty hack to avoid declared and not used: ctx error
+        puts('    fmt.Println("NOOP");');
+        puts('}');
+    } else {
+        puts("_ = ctx");
+    }
 
     let i = 0;
     while (i < n) {
         let stmt = stmts[i];
+
+        // Keep track of last result in case of missing return statement in
+        // function. `result=<expr>` only works when <expr> is a Go expression;
+        // statically-resolved param/let assignments emit Go statements of the
+        // form `ij_x = value`, so that case needs two emitted lines.
+        let isLast = (i == n-1);
+        let isGoVarAssign = false;
+        if (stmt["type"] == "AssignmentStatement") {
+            let so = stmt["resolvedOrigin"];
+            let sk = stmt["resolvedKind"];
+            if (so == "param") { isGoVarAssign = true; }
+            if (so == "let") {
+                if (sk == "local" || sk == "captured") { isGoVarAssign = true; }
+            }
+            if (sk == "global") {
+                if (so == "lib" || so == "def" || so == "let") { isGoVarAssign = true; }
+            }
+        }
+
+        if (isLast && stmt["type"] != "ReturnStatement") {
+            if (stmt["type"] == "AssignmentStatement") {
+                if (!isGoVarAssign) { print('result='); }
+            }
+            if (stmt["type"] == "IndexAssignmentStatement") { print('result='); }
+            if (stmt["type"] == "ExpressionStatement") { print('result='); }
+        }
+
         if (stmt["toGo"] != null) {
             stmt["toGo"](stmt);
+            puts("");
         }
+
+        if (isLast && isGoVarAssign) {
+            puts('result=' + stmt["resolvedName"]);
+        }
+
         i = i + 1;
     }
 
-    puts("}");
+    print("}"); // to support } else {
 }
 
 
@@ -1768,16 +1928,21 @@ def functionDeclarationToGo(self) {
         let param = self["parameters"][i];
         let mangled = mangle(param);
 
-        puts('ctx.Create("' + param + '", params.Get(Value{tag: tInt, i: ' + intString(i) + '}))');
+        puts('var ' + mangled + ' Value = params.Get(Value{tag: tInt, i: ' + intString(i) + '})');
+        puts('_ = ' + mangled);
 
         i = i + 1;
     }
 
-    // Emit the body
+    // Emit the body via blockStatementToGo so the body gets its own Go scope.
+    // This lets function-local `let` shadow parameters (e.g. `def f(i) { let i = ... }`),
+    // since the `var ij_i` inside the inner block is a distinct variable from the
+    // parameter binding emitted above.
     let body = self["body"];
     if (body != null) {
         if (body["toGo"] != null) {
             body["toGo"](body);
+            puts("");
         }
     }
 
@@ -1814,16 +1979,11 @@ def emitQueuedImpls() {
             q = q + 1;
         }
         puts('result=vNull()');
-        puts('local := NewContext(ctx)');
-        let r = 0;
-        while (r < pn) {
-            puts('local.Create("' + self["parameters"][r] + '", ' + mangle(self["parameters"][r]) + ')');
-            r = r + 1;
-        }
         let body = self["body"];
         if (body != null) {
             if (body["toGo"] != null) {
                 body["toGo"](body);
+                puts("");
             }
         }
         puts('return result');
@@ -1875,12 +2035,12 @@ def numberLiteralToGo(self) {
     let i = 0;
     while (i < len(str)) {
         if (char(str, i) == ".") {
-            print('&Node{kind: nkDoubleLit, dVal: ' + str + '}');
+            print('Value{tag: tDouble, d: ' + str + '}');
             return;
         }
         i = i + 1;
     }
-    print('&Node{kind: nkIntLit, iVal: ' + str + '}');
+    print('Value{tag: tInt, i: ' + str + '}');
 }
 
 
@@ -1929,7 +2089,7 @@ def stringLiteralToJson(thisNode) {
 }
 
 def stringLiteralToGo(self) {
-    print('&Node{kind: nkStringLit, name: "' + escapeGoStringLiteral(self["value"]) + '"}');
+    print('Value{tag: tString, s: "' + escapeGoStringLiteral(self["value"]) + '"}');
 }
 
 def escapeGoStringLiteral(s) {
@@ -1992,10 +2152,10 @@ def toJsonBooleanLiteral(self) {
 
 def toGoBooleanLiteral(self) {
     if (self["value"]) {
-        print('&Node{kind: nkBoolLit, bVal: true}');
+        print('vBool(true)');
     }
     else {
-        print('&Node{kind: nkBoolLit, bVal: false}');
+        print('vBool(false)');
     }
 }
 
@@ -2033,14 +2193,31 @@ def identifierToJson(self) {
 }
 
 def identifierToGo(self) {
-    print('&Node{kind: nkIdent, name: "' + self["name"] + '"');
-    if (self["resolvedKind"] != null) {
-        print(', resolvedKind: ' + intString(self["resolvedKind"]));
+    // Go: hello vs. ctx.Get("hello")
+
+    // Static resolution: params and function-local lets are emitted as Go
+    // vars (phases C3/C4); library functions and top-level lets/defs are
+    // emitted as package-level Go vars (phases C6/C7). Only truly
+    // unresolved globals fall back to ctx.Get.
+    let origin = self["resolvedOrigin"];
+    let kind = self["resolvedKind"];
+    if (origin == "param") {
+        print(self["resolvedName"]);
+        return null;
     }
-    if (self["resolvedName"] != null) {
-        print(', resolvedName: "' + self["resolvedName"] + '"');
+    if (origin == "let") {
+        if (kind == "local" || kind == "captured") {
+            print(self["resolvedName"]);
+            return null;
+        }
     }
-    print('}');
+    if (kind == "global") {
+        if (origin == "lib" || origin == "def" || origin == "let") {
+            print(self["resolvedName"]);
+            return null;
+        }
+    }
+    print('ctx.Get("' + self["name"] + '")');
     return null;
 }
 
@@ -3141,12 +3318,11 @@ def CallExpression_toGo(self) {
                             print(mangle(callee["name"]) + '_impl(ctx');
                             let di = 0;
                             while (di < argsLen) {
-                                print(', eval(');
+                                print(',');
                                 let argNode = self["arguments"][di];
                                 if (argNode["toGo"] != null) {
                                     argNode["toGo"](argNode);
                                 }
-                                print(', ctx)');
                                 di = di + 1;
                             }
                             print(')');
@@ -3158,14 +3334,13 @@ def CallExpression_toGo(self) {
         }
     }
 
-    print('&Node{kind: nkCall, left: ');
     callee["toGo"](callee);
-    print(', list: []*Node{');
+    print('.Execute(ctx, NewArrayValue(');
 
     let i = 0;
     while (i < argsLen) {
         if (i > 0) {
-            print(', ');
+            print(',');
         }
 
         let argNode = self["arguments"][i];
@@ -3177,7 +3352,7 @@ def CallExpression_toGo(self) {
         i = i + 1;
     }
 
-    print('}}');
+    print('))');
 }
 
 // Helper: value to string for non-function error message
@@ -3346,19 +3521,29 @@ def conditionToGoBool(condNode) {
 }
 
 def ifStatementToGo(self) {
-    print('&Node{kind: nkIfStmt, left: ');
-    self["condition"]["toGo"](self["condition"]);
-    print(', body: ');
+    // Go: if true {
+	//   return IntValue{val: 100}
+	// } else {
+	//   return IntValue{val: 111}
+    // }
+
+    print('if ');
+
+    conditionToGoBool(self["condition"]);
+
+    print(' ');
+
     if (self["consequence"]["toGo"] != null) {
         self["consequence"]["toGo"](self["consequence"])
     }
+
     if (self["alternative"] != null) {
-        print(', right: ');
+        print(' else ');
+
         if (self["alternative"]["toGo"] != null) {
             self["alternative"]["toGo"](self["alternative"])
-        }
+        }   
     }
-    print('}');
 }
 
 
@@ -3792,13 +3977,29 @@ def PrefixExpression_toJson(self) {
 }
 
 def PrefixExpression_toGo(self) {
-    print('&Node{kind: nkPrefix, op: ' + opCodeFor(self["operator"]) + ', right: ');
+    let op = self["operator"];
 
-    if (self["right"]["toGo"] != null) {
-        self["right"]["toGo"](self["right"])
+    if (op == "-") {
+        print('Value{tag: tInt, i: -1}.Multiply(');
+
+        if (self["right"]["toGo"] != null) {
+            self["right"]["toGo"](self["right"])
+        }
+
+        print(')');
     }
+    else {
+        if (op == "!") {
+            if (self["right"]["toGo"] != null) {
+                self["right"]["toGo"](self["right"])
+            }
 
-    print('}');
+            print(".Not()")
+        }
+        else {
+            puts(" //FIXME PrefixExpression_toGo " + self["operator"]);
+        }
+    }
 }
 
 
@@ -4175,15 +4376,25 @@ def indexAssignmentStatement_toJson(self) {
 }
 
 def indexAssignmentStatement_toGo(self) {
-    print('&Node{kind: nkIndexAssign, left: ');
-    self["collection"]["toGo"](self["collection"]);
-    print(', right: ');
-    self["index"]["toGo"](self["index"]);
-    print(', body: ');
+    // Go: foo.Put(IntValue{val: 0}, IntValue{val: 999})
+
+    if (self["collection"]["toGo"] != null) {
+        self["collection"]["toGo"](self["collection"])
+    }
+
+    print('.Put(')
+
+    if (self["index"]["toGo"] != null) {
+        self["index"]["toGo"](self["index"])
+    }
+
+    print(',')
+
     if (self["value"]["toGo"] != null) {
         self["value"]["toGo"](self["value"])
     }
-    print('}')
+
+    print(')')
 }
 
 
@@ -4313,7 +4524,7 @@ def makeMapLiteral(pairs, position) {
   def toGo(self) {
     // Go: bar := NewMapValue(KeyValuePair{Key: IntValue{val: 66}, Value: IntValue{val: 999}})
     
-    print('&Node{kind: nkMapLit, list: []*Node{');
+    print('NewMapValue(');
 
     let pairsArr = node["pairs"];
     let i = 0;
@@ -4323,26 +4534,26 @@ def makeMapLiteral(pairs, position) {
       let valueNode = pair["value"];
 
       if (i > 0) {
-        print(', ');
+        print(",");
       }
-      
+      print('KeyValuePair{Key: ');
 
       if (keyNode["toGo"] != null) {
         keyNode["toGo"](keyNode)
       }
 
-      print(', ');
+      print(', Value: ');
 
       if (valueNode["toGo"] != null) {
         valueNode["toGo"](valueNode)
       }
 
-      
+      print('}');
 
       i = i + 1
     }
 
-    print('}}');
+    print(')');
   }
   node["toGo"] = toGo;
 
@@ -4515,6 +4726,7 @@ def makeProgram() {
             let stmt = stmts[i];
             if (stmt["toGo"] != null) {
                 stmt["toGo"](stmt);
+                puts("");
             }
             i = i + 1;
         }
@@ -4574,15 +4786,37 @@ def variableDeclarationToJson(self) {
 }
 
 def variableDeclarationToGo(self) {
-    print('&Node{kind: nkVarDecl, name: "' + self["name"] + '"');
+    // Function-local lets are emitted as Go vars so references can resolve
+    // statically (C4).
+    if (self["resolvedAtRoot"] == false) {
+        print('var ' + self["resolvedName"] + ' Value = ');
+        let init = self["initializer"];
+        if (init != null) {
+            if (init["toGo"] != null) {
+                init["toGo"](init);
+            }
+        } else {
+            print('vNull()');
+        }
+        puts('');
+        puts('_ = ' + self["resolvedName"]);
+        return null;
+    }
+
+    // Root-level `let` (C7): assign to the package-level Go var and keep
+    // the ctx.Create mirror for dynamic lookup fallback.
+    print(self["resolvedName"] + ' = ');
     let init = self["initializer"]
     if (init != null) {
-        print(', right: ');
         if (init["toGo"] != null) {
             init["toGo"](init);
         }
     }
-    print('}');
+    else {
+        print('vNull()');
+    }
+    puts('');
+    puts('ctx.Create("' + self["name"] + '", ' + self["resolvedName"] + ')');
     return null;
 }
 

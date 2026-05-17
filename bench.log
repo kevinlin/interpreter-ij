@@ -82,3 +82,20 @@ real	0m0.022s
 user	0m0.007s
 sys	0m0.012s
 
+=== 2026-05-17T08:31:12Z label=phase2-runtime ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m25.193s
+user	2m29.100s
+sys	0m1.201s
+-- interpreter.sh test.s --
+
+real	0m0.653s
+user	0m0.886s
+sys	0m0.111s
+-- native_interpreter.sh src/test.s --
+
+real	0m0.022s
+user	0m0.007s
+sys	0m0.012s
+
