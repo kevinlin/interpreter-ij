@@ -1,6 +1,6 @@
 # Implementation Plan — Self-Hosted Interpreter 10x Perf
 
-Status: **Phase 0 complete, Phase 1 complete, Phase 2 partial (Node tree codegen active; verify.sh 1-5 pass via fb2b299 transpiler; full self-hosted transpile produces truncated output)**
+Status: **Phase 0 complete, Phase 1 complete, Phase 2 partial (Node tree codegen active; verify.sh 1-5 pass via fb2b299 transpiler; push() + NewArrayValue fixed; Binary B crash root-caused to deep eval recursion in goLibPrefix eval functions; full self-hosted transpile blocked on eval depth)**
 
 ## Phase 0 — Baseline Capture ✅
 
@@ -114,13 +114,23 @@ All 21 `*ToGo` emitters rewritten to emit `&Node{...}` struct literals:
 - [x] verify.sh: checks 1-5 all pass (using fb2b299 as transpiler)
 - [x] Simple programs compile and run correctly with Phase 2 codegen
 
-**Known issue:**
-- [ ] Push function in goLibPrefix returns `ele` instead of `arr`, breaking `refreshToGoPointers` iterative stack management. Fixed: `return ele` → `return arr` in `src/interpreter.s` goLibPrefix emission.
-- [ ] With push fix, `refreshToGoPointers` correctly rebinds toGo methods to Phase 2 Node tree emitters.
-- [ ] Binary A (built from committed binary) produces correct Node tree codegen in genB (verified: programNode in main, eval(programNode in main)).
-- [ ] Binary B (built from Binary A with push fix) compiles but has Node tree eval bugs: `let`, `while`, `while`, map literal all produce no output. Simple expressions like `puts(1+2)`, array literals, and if statements work.
-- [ ] Root cause of Binary B eval bugs needs deeper investigation in the goLibPrefix-emitted eval functions.
-- [ ] The committed binary must be rebuilt to propagate the push fix (the compiled-in push still returns `ele`).
+**Known issues and findings:**
+
+Push() fix:
+- [x] Push function in goLibPrefix returned `ele` instead of `arr`. Fixed in source: `return ele` → `return arr` at goLibPrefix emission.
+- [x] Confirmed: with push fix, `refreshToGoPointers` correctly rebinds toGo methods to Phase 2 Node tree emitters.
+
+NewArrayValue fix:
+- [x] Zero-arg function calls (e.g. `makeInterpreter()`) created `ArrayValue` with nil `values` slice, causing downstream panics.
+- [x] Fixed in source: `if elements == nil { return &ArrayValue{values: []Value{}} }` added to `NewArrayValue` in goLibPrefix (`interpreter.s` ~line 5076).
+- [x] Same fix patched into `fix_app_go.py` Step 7c so legacy binary output gets the nil-guard.
+
+Binary B crash root-caused:
+- [x] Binary B's eval of the 772KB compiled-in Node tree for `interpreter.s` panics with "index out of range [0] with length 0" in a library function during deep eval recursion.
+- [ ] Binary A works because Binary 0 emits old-style code (`ij_puts.Execute` calls) alongside a near-empty `programNode`, providing a working transpilation path that doesn't rely on `eval(programNode)`.
+- [x] The committed binary (pre-cleanup, `ac2e6f3`) uses its **compiled-in goLibPrefix** (old code), not the source code's goLibPrefix. Source changes to goLibPrefix don't propagate until the committed binary is rebuilt. The `fix_app_go.py` bridge is the mechanism to patch emitted Go code.
+- [x] Phase 2 eval functions work correctly for small programs (`test.s`, `sample.s`) but the eval recursion for `interpreter.s`'s 772KB Node tree is too deep. The crash is a bounds-check failure in a string indexing operation within a library function, triggered by deeply nested `evalIf`/`evalBlock` recursion.
+- [ ] Binary B crash requires either depth reduction (e.g. iterative eval) or Binary 0 route (old-style codegen) to unblock full self-hosted transpile.
 
 ### fix_app_go.py updates
 

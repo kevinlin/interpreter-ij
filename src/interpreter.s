@@ -5073,6 +5073,7 @@ puts("type ArrayValue struct {");
 puts("values []Value");
 puts("}");
 puts("func NewArrayValue(elements ...Value) *ArrayValue {");
+puts("if elements == nil { return &ArrayValue{values: []Value{}} }");
 puts("return &ArrayValue{values: elements}");
 puts("}");
 puts("func (a *ArrayValue) Get(index Value) Value {");

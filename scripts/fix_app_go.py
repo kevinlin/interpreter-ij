@@ -214,6 +214,13 @@ def fix_app_go(content: str) -> str:
         'func ValueToOld(v Value) Value { return nil }',
         'func ValueToOld(v Value) Value { return Value{} }'
     )
+    # 7c. Fix NewArrayValue nil values: when called with no args (new binary
+    #     evalCall creates args for zero-arg calls), the values slice is nil
+    #     and library functions panic on params.Get(...). Ensure non-nil.
+    content = content.replace(
+        'func NewArrayValue(elements ...Value) *ArrayValue {\nreturn &ArrayValue{values: elements}\n}',
+        'func NewArrayValue(elements ...Value) *ArrayValue {\nif elements == nil { return &ArrayValue{values: []Value{}} }\nreturn &ArrayValue{values: elements}\n}'
+    )
 
     # 7b. Fix main(): remove old context setup, avoid duplicate ctx declarations
     # The old binary's main() has both ctx (old) and ctx2 (new) setups.
