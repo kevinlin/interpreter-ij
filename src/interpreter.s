@@ -5661,6 +5661,23 @@ def collectStaticDefs(stmts) {
 // this list as more `*ToGoDirect` emitters land.
 let directEmitAllowlist = {};
 directEmitAllowlist["nullLiteralEvaluate"] = true;
+// Run N+1 additions: expression-only defs whose bodies use only the node
+// kinds supported by the dispatcher today (NullLit/BoolLit/NumLit/StrLit,
+// Identifier, Block, Return, Infix, Prefix, Call, Index). All callees and
+// identifiers are either parameters (kind=local/origin=param) or static defs
+// in staticDefByName, never library names — library identifier references
+// expand to `ij_<libname>` which is NOT declared at package scope under the
+// Phase-2 emit, and the closest follow-up loop will add that plumbing
+// alongside statement-level emitters.
+directEmitAllowlist["mangle"] = true;
+directEmitAllowlist["positionGetLine"] = true;
+directEmitAllowlist["positionGetColumn"] = true;
+directEmitAllowlist["positionToString"] = true;
+directEmitAllowlist["numberLiteralEvaluate"] = true;
+directEmitAllowlist["getStringLiteralValue"] = true;
+directEmitAllowlist["evaluateStringLiteral"] = true;
+directEmitAllowlist["getBooleanLiteralValue"] = true;
+directEmitAllowlist["evaluateBooleanLiteral"] = true;
 
 // D1-reborn per-node-kind direct emitters. Each prints raw Go statement or
 // expression text (no `&Node{...}` literals). Call sites are reached through
@@ -5748,6 +5765,122 @@ def blockStatementToGoDirect(self) {
     puts("}");
 }
 
+// Run N+1 expression-level emitters.
+//
+// Direct-emit produces Go expressions whose value type is `Value` (the tagged
+// union). Every operator lowers onto a `Value` method. Receivers are wrapped
+// in parens so nested expressions (e.g. `a + b + c` -> chained `Add`) stay
+// unambiguous regardless of what the recursive emit produced.
+
+def infixExpressionToGoDirect(self) {
+    let op = self["operator"];
+    // != is a.Equals(b).Not() — Equals returns Value, .Not() flips the bool tag.
+    if (op == "!=") {
+        print("(");
+        nodeToGoDirect(self["left"]);
+        print(").Equals(");
+        nodeToGoDirect(self["right"]);
+        print(").Not()");
+        return null;
+    }
+    let method = "Add";
+    if (op == "+") { method = "Add"; }
+    if (op == "-") { method = "Subtract"; }
+    if (op == "*") { method = "Multiply"; }
+    if (op == "/") { method = "Divide"; }
+    if (op == "%") { method = "Modulo"; }
+    if (op == "==") { method = "Equals"; }
+    if (op == "<") { method = "LessThan"; }
+    if (op == "<=") { method = "LessThanEqual"; }
+    if (op == ">") { method = "BiggerThan"; }
+    if (op == ">=") { method = "BiggerThanEqual"; }
+    if (op == "&&") { method = "And"; }
+    if (op == "||") { method = "Or"; }
+    print("(");
+    nodeToGoDirect(self["left"]);
+    print(").");
+    print(method);
+    print("(");
+    nodeToGoDirect(self["right"]);
+    print(")");
+}
+
+def prefixExpressionToGoDirect(self) {
+    let op = self["operator"];
+    if (op == "!") {
+        print("(");
+        nodeToGoDirect(self["right"]);
+        print(").Not()");
+        return null;
+    }
+    if (op == "-") {
+        // No Value.Negate helper in goLibPrefix; subtract from vInt(0).
+        print("vInt(0).Subtract(");
+        nodeToGoDirect(self["right"]);
+        print(")");
+        return null;
+    }
+    puts("D1R_UNSUPPORTED_PREFIX_OP_" + op);
+}
+
+// CallExpression dispatch mirrors CallExpression_toGo's static-vs-indirect
+// gate (kind=global && origin=def && staticDefByName[name]). Static-def
+// callees skip the Value->FunctionCommand.Execute indirection by calling the
+// impl directly (still through the []Value calling convention so the impl
+// signature does not change between nkStaticCall and direct-emit dispatch).
+// Indirect callees fall back to Value.Execute(ctx, *ArrayValue); fix_app_go.py
+// keeps `.Execute(ctx, NewArrayValue(...))` untouched while rewriting bare
+// NewArrayValue -> NewArrayValueAsValue elsewhere, so the *ArrayValue arg is
+// preserved as the post-processor expects.
+def CallExpression_toGoDirect(self) {
+    let callee = self["callee"];
+    let args = self["arguments"];
+    let argsLen = len(args);
+
+    let isStaticCall = false;
+    if (callee != null) {
+        if (callee["type"] == "Identifier") {
+            if (callee["resolvedKind"] == "global") {
+                if (callee["resolvedOrigin"] == "def") {
+                    if (staticDefByName[callee["name"]] != null) {
+                        isStaticCall = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (isStaticCall) {
+        print(mangle(callee["name"]) + "_impl(ctx, []Value{");
+        let i = 0;
+        while (i < argsLen) {
+            if (i > 0) { print(", "); }
+            nodeToGoDirect(args[i]);
+            i = i + 1;
+        }
+        print("})");
+    } else {
+        print("(");
+        nodeToGoDirect(callee);
+        print(").Execute(ctx, NewArrayValue(");
+        let i = 0;
+        while (i < argsLen) {
+            if (i > 0) { print(", "); }
+            nodeToGoDirect(args[i]);
+            i = i + 1;
+        }
+        print("))");
+    }
+}
+
+def IndexExpression_toGoDirect(self) {
+    print("(");
+    nodeToGoDirect(self["collection"]);
+    print(").Get(");
+    nodeToGoDirect(self["index"]);
+    print(")");
+}
+
 // Dispatcher: route by AST node type. Unknown / unsupported kinds emit a
 // sentinel that fails the Go build loudly so a mistakenly-opt'd-in def is
 // caught at `compile-local.sh` time rather than silently miscompiling.
@@ -5761,6 +5894,10 @@ def nodeToGoDirect(node) {
     if (t == "Identifier") { identifierToGoDirect(node); return null; }
     if (t == "BlockStatement") { blockStatementToGoDirect(node); return null; }
     if (t == "ReturnStatement") { ReturnStatement_toGoDirect(node); return null; }
+    if (t == "InfixExpression") { infixExpressionToGoDirect(node); return null; }
+    if (t == "PrefixExpression") { prefixExpressionToGoDirect(node); return null; }
+    if (t == "CallExpression") { CallExpression_toGoDirect(node); return null; }
+    if (t == "IndexExpression") { IndexExpression_toGoDirect(node); return null; }
     puts("D1R_UNSUPPORTED_NODE_KIND_" + t + " // direct-emit fallback -- forces build failure");
     return null;
 }
