@@ -5614,6 +5614,7 @@ def collectStaticDefs(stmts) {
         i = i + 1;
     }
 
+    // Pass 2: mark promoted defs + populate staticDefByName.
     // D2-reborn requires only: top-level (resolvedAtRoot) + single binding.
     // resolvedIsStatic was the D1-inlining predicate (no global writes, no
     // dynamic lookups so identifiers could be hoisted to Go vars); D2 keeps
@@ -5632,19 +5633,40 @@ def collectStaticDefs(stmts) {
                         s["isStaticPromoted"] = true;
                         push(staticDefNames, s["name"]);
                         staticDefByName[s["name"]] = s;
-                        // D1-reborn: opt promoted defs into direct-Go-statement
-                        // body emit when their name is in the allowlist AND the
-                        // resolver classified them as fully static (no nested
-                        // defs, no dynamic lookups, no global writes). The static
-                        // predicate matters here -- direct emit lowers ctx
-                        // reads/writes onto Go locals, so any IJ statement that
-                        // depends on per-call ctx semantics (assignment fall-
-                        // through, captured-by-inner-def, ctx.Exists-style
-                        // dynamic lookup) would silently miscompile.
-                        if (s["resolvedIsStatic"] == true) {
-                            if (directEmitAllowlist[s["name"]] == true) {
-                                s["useDirectEmit"] = true;
-                            }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    // Pass 3: opt promoted defs into direct-Go-statement body emit.
+    // Run separately so staticDefByName is fully populated before
+    // canDirectEmit walks bodies and reasons about CallExpression callees.
+    // The opt-in trigger is either:
+    //   (a) explicit allowlist (manual override, mostly for legacy
+    //       Run-N+1 names that the body-coverage check ALSO accepts),
+    //   (b) body-coverage check (canDirectEmit) AND resolvedIsStatic
+    //       (no nested defs, no global writes, no dynamic lookups).
+    // resolvedIsStatic is the safety belt against silent miscompiles:
+    // direct-emit lowers identifier reads to Go vars, so any IJ
+    // statement that depends on per-call ctx semantics (assignment
+    // fall-through, captured-by-inner-def, ctx.Exists-style dynamic
+    // lookup) would silently emit wrong code without it. The body
+    // coverage check is necessary too: even a fully static body can
+    // reference top-level lets / defs as bare values, which we do not
+    // emit Go vars for (lib globals plumbing only covers library names).
+    i = 0;
+    while (i < n) {
+        let s = stmts[i];
+        if (s != null) {
+            if (s["isStaticPromoted"] == true) {
+                if (s["resolvedIsStatic"] == true) {
+                    if (directEmitAllowlist[s["name"]] == true) {
+                        s["useDirectEmit"] = true;
+                    } else {
+                        if (canDirectEmit(s["body"])) {
+                            s["useDirectEmit"] = true;
                         }
                     }
                 }
@@ -5653,6 +5675,149 @@ def collectStaticDefs(stmts) {
         i = i + 1;
     }
     return null;
+}
+
+// Body-coverage check used by collectStaticDefs Pass 3. Walks the body and
+// returns true iff every node kind is supported by nodeToGoDirect AND every
+// identifier / call-callee resolves to a name we can emit as a Go variable.
+//
+// The strict identifier rule reflects what programToGoPhase2 actually emits
+// at package scope:
+//   - kind=local            -> Go param / block-let / let-captured. Always OK.
+//   - kind=global,origin=lib -> var ij_<n> Value (lib globals plumbing). OK.
+//   - kind=global,origin=def -> as call callee in staticDefByName: OK
+//                                (CallExpression_toGoDirect emits ij_<n>_impl);
+//                                as bare value: NOT OK (no Go var named
+//                                ij_<n>; only ij_<n>_impl and ij_<n>_body).
+//   - kind=global,origin=let -> NOT OK (Phase 2 does not emit Go vars for
+//                                top-level lets).
+// The CallExpression branch checks the callee under a relaxed rule, then
+// recurses into args under the normal rule.
+def canDirectEmit(node) {
+    if (node == null) { return true; }
+    if (!isMap(node)) { return true; }
+    let t = node["type"];
+    if (t == null) { return true; }
+
+    let supported = false;
+    if (t == "NullLiteral") { supported = true; }
+    if (t == "BooleanLiteral") { supported = true; }
+    if (t == "NumberLiteral") { supported = true; }
+    if (t == "StringLiteral") { supported = true; }
+    if (t == "Identifier") { supported = true; }
+    if (t == "BlockStatement") { supported = true; }
+    if (t == "ReturnStatement") { supported = true; }
+    if (t == "InfixExpression") { supported = true; }
+    if (t == "PrefixExpression") { supported = true; }
+    if (t == "CallExpression") { supported = true; }
+    if (t == "IndexExpression") { supported = true; }
+    if (t == "ExpressionStatement") { supported = true; }
+    if (t == "VariableDeclaration") { supported = true; }
+    if (t == "AssignmentStatement") { supported = true; }
+    if (t == "IfStatement") { supported = true; }
+    if (t == "WhileStatement") { supported = true; }
+    if (t == "IndexAssignmentStatement") { supported = true; }
+    if (t == "ArrayLiteral") { supported = true; }
+    if (t == "MapLiteral") { supported = true; }
+    if (!supported) { return false; }
+
+    if (t == "Identifier") {
+        let kind = node["resolvedKind"];
+        let origin = node["resolvedOrigin"];
+        if (kind == "local") { return true; }
+        if (kind == "global") {
+            if (origin == "lib") { return true; }
+            return false;
+        }
+        return false;
+    }
+
+    if (t == "CallExpression") {
+        let callee = node["callee"];
+        if (callee != null) {
+            if (isMap(callee)) {
+                if (callee["type"] == "Identifier") {
+                    let ckind = callee["resolvedKind"];
+                    let corigin = callee["resolvedOrigin"];
+                    let ok = false;
+                    if (ckind == "local") { ok = true; }
+                    if (ckind == "global") {
+                        if (corigin == "lib") { ok = true; }
+                        if (corigin == "def") {
+                            if (staticDefByName[callee["name"]] != null) { ok = true; }
+                        }
+                    }
+                    if (!ok) { return false; }
+                } else {
+                    if (!canDirectEmit(callee)) { return false; }
+                }
+            }
+        }
+        let args = node["arguments"];
+        if (args != null) {
+            if (isArray(args)) {
+                let ai = 0;
+                while (ai < len(args)) {
+                    if (!canDirectEmit(args[ai])) { return false; }
+                    ai = ai + 1;
+                }
+            }
+        }
+        return true;
+    }
+
+    let scalarKeys = ["condition","consequence","alternative","body","left","right","collection","index","value","callee","expression","initializer"];
+    let si = 0;
+    while (si < len(scalarKeys)) {
+        let k = scalarKeys[si];
+        let child = node[k];
+        if (child != null) {
+            if (isMap(child)) {
+                if (!canDirectEmit(child)) { return false; }
+            }
+        }
+        si = si + 1;
+    }
+    let arrKeys = ["statements","elements","arguments"];
+    let aj = 0;
+    while (aj < len(arrKeys)) {
+        let k = arrKeys[aj];
+        let arr = node[k];
+        if (arr != null) {
+            if (isArray(arr)) {
+                let m = 0;
+                while (m < len(arr)) {
+                    if (arr[m] != null) {
+                        if (isMap(arr[m])) {
+                            if (!canDirectEmit(arr[m])) { return false; }
+                        }
+                    }
+                    m = m + 1;
+                }
+            }
+        }
+        aj = aj + 1;
+    }
+    let pairs = node["pairs"];
+    if (pairs != null) {
+        if (isArray(pairs)) {
+            let p = 0;
+            while (p < len(pairs)) {
+                let pair = pairs[p];
+                if (pair != null) {
+                    if (isMap(pair)) {
+                        let pk = pair["key"];
+                        if (pk != null) { if (isMap(pk)) { if (!canDirectEmit(pk)) { return false; } } }
+                        let pv = pair["value"];
+                        if (pv != null) { if (isMap(pv)) { if (!canDirectEmit(pv)) { return false; } } }
+                    }
+                }
+                p = p + 1;
+            }
+        }
+    }
+
+    return true;
 }
 
 // D1-reborn allowlist. MVP scope: one leaf def (`nullLiteralEvaluate`) whose
@@ -5737,7 +5902,11 @@ def identifierToGoDirect(self) {
         if (kind == "global") {
             print(mangle(nm));
         } else {
-            print("ctx.Get(Value{tag: tString, s: " + chr(34) + nm + chr(34) + "})");
+            // Fallback: unannotated AST nodes go through ctx.Get. The
+            // canDirectEmit predicate normally screens these out before
+            // we get here, so this branch is defense-in-depth. Go signature
+            // is Context.Get(name string) Value -- pass a bare Go string.
+            print("ctx.Get(" + chr(34) + nm + chr(34) + ")");
         }
     }
 }
@@ -5881,6 +6050,138 @@ def IndexExpression_toGoDirect(self) {
     print(")");
 }
 
+// Run N+2 statement-level emitters.
+//
+// Local Go let scoping mirrors IJ block scoping: a `var ij_<n> Value = ...`
+// is visible only within the enclosing Go `{ ... }`, so inner-block lets
+// shadow outer-block lets the same way IJ does. AssignmentStatement target
+// is constrained to params + block-locals (resolvedIsStatic forbids
+// global writes), so `ij_<n> = expr` is always re-assigning a Go var
+// already in scope.
+def variableDeclarationToGoDirect(self) {
+    print("var " + mangle(self["name"]) + " Value = ");
+    let init = self["initializer"];
+    if (init != null) {
+        nodeToGoDirect(init);
+    } else {
+        print("vNull()");
+    }
+    puts("");
+    puts("_ = " + mangle(self["name"]));
+}
+
+def assignmentStatementToGoDirect(self) {
+    print(mangle(self["name"]) + " = ");
+    nodeToGoDirect(self["value"]);
+    puts("");
+}
+
+def expressionStatementToGoDirect(self) {
+    // ExpressionStatement direct emit: `_ = <expr>` so Go is happy with any
+    // Value-typed expression at statement position (including bare reads).
+    // CallExpressions are valid statements in Go without the `_ =` wrap,
+    // but the universal form keeps emit simple and lets the Go compiler
+    // discard the result.
+    let expr = self["expression"];
+    if (expr == null) {
+        return null;
+    }
+    print("_ = ");
+    nodeToGoDirect(expr);
+    puts("");
+}
+
+// Helper: emit the body of an if/while branch. If the body is a
+// BlockStatement, emit its statements directly inside the outer Go braces
+// the if/while emits -- avoids `{ { ... } }` nesting that would needlessly
+// introduce an inner Go scope. Non-block bodies (single statement form,
+// rare in IJ) just emit themselves.
+def emitDirectBodyStatements(node) {
+    if (node == null) { return null; }
+    if (node["type"] == "BlockStatement") {
+        let stmts = node["statements"];
+        let n = len(stmts);
+        let i = 0;
+        while (i < n) {
+            nodeToGoDirect(stmts[i]);
+            i = i + 1;
+        }
+    } else {
+        nodeToGoDirect(node);
+    }
+    return null;
+}
+
+def ifStatementToGoDirect(self) {
+    print("if (");
+    nodeToGoDirect(self["condition"]);
+    puts(").IsTruthy() {");
+    puts("_ = ctx");
+    emitDirectBodyStatements(self["consequence"]);
+    if (self["alternative"] != null) {
+        puts("} else {");
+        puts("_ = ctx");
+        emitDirectBodyStatements(self["alternative"]);
+    }
+    puts("}");
+}
+
+def whileStatementToGoDirect(self) {
+    print("for (");
+    nodeToGoDirect(self["condition"]);
+    puts(").IsTruthy() {");
+    puts("_ = ctx");
+    emitDirectBodyStatements(self["body"]);
+    puts("}");
+}
+
+def indexAssignmentToGoDirect(self) {
+    print("(");
+    nodeToGoDirect(self["collection"]);
+    print(").Put(");
+    nodeToGoDirect(self["index"]);
+    print(",");
+    nodeToGoDirect(self["value"]);
+    puts(")");
+}
+
+def arrayLiteralToGoDirect(self) {
+    // Direct-emit impls live BEFORE main() in app.go and fix_app_go.py only
+    // rewrites the body section (post-main). So we must emit the AsValue
+    // form ourselves -- bare NewArrayValue(...) returns *ArrayValue and
+    // breaks any "var X Value = ...", "return ...", call-arg, etc. context
+    // where the surrounding Go expects Value. NewArrayValueAsValue is
+    // unconditionally injected by fix_app_go.py STEP 5.
+    print("NewArrayValueAsValue(");
+    let elems = self["elements"];
+    let n = len(elems);
+    let i = 0;
+    while (i < n) {
+        if (i > 0) { print(","); }
+        nodeToGoDirect(elems[i]);
+        i = i + 1;
+    }
+    print(")");
+}
+
+def mapLiteralToGoDirect(self) {
+    print("NewMapValueAsValue(");
+    let pairs = self["pairs"];
+    let n = len(pairs);
+    let i = 0;
+    while (i < n) {
+        if (i > 0) { print(","); }
+        let pair = pairs[i];
+        print("KeyValuePair{Key: ");
+        nodeToGoDirect(pair["key"]);
+        print(", Value: ");
+        nodeToGoDirect(pair["value"]);
+        print("}");
+        i = i + 1;
+    }
+    print(")");
+}
+
 // Dispatcher: route by AST node type. Unknown / unsupported kinds emit a
 // sentinel that fails the Go build loudly so a mistakenly-opt'd-in def is
 // caught at `compile-local.sh` time rather than silently miscompiling.
@@ -5898,6 +6199,14 @@ def nodeToGoDirect(node) {
     if (t == "PrefixExpression") { prefixExpressionToGoDirect(node); return null; }
     if (t == "CallExpression") { CallExpression_toGoDirect(node); return null; }
     if (t == "IndexExpression") { IndexExpression_toGoDirect(node); return null; }
+    if (t == "ExpressionStatement") { expressionStatementToGoDirect(node); return null; }
+    if (t == "VariableDeclaration") { variableDeclarationToGoDirect(node); return null; }
+    if (t == "AssignmentStatement") { assignmentStatementToGoDirect(node); return null; }
+    if (t == "IfStatement") { ifStatementToGoDirect(node); return null; }
+    if (t == "WhileStatement") { whileStatementToGoDirect(node); return null; }
+    if (t == "IndexAssignmentStatement") { indexAssignmentToGoDirect(node); return null; }
+    if (t == "ArrayLiteral") { arrayLiteralToGoDirect(node); return null; }
+    if (t == "MapLiteral") { mapLiteralToGoDirect(node); return null; }
     puts("D1R_UNSUPPORTED_NODE_KIND_" + t + " // direct-emit fallback -- forces build failure");
     return null;
 }
@@ -5913,6 +6222,21 @@ def programToGoPhase2(self) {
     // and Node-tree emit does not matter, but the body refs they read
     // (ij_<name>_body) are populated in main() before programNode is built.
     collectStaticDefs(stmts);
+
+    // D1-reborn Run N+2: library globals plumbing. Direct-emit bodies refer to
+    // library functions by bare `ij_<libname>` Go identifier (via identifier
+    // and call-expression direct emitters). Declare those as package-scope
+    // vars here so the references compile; populate them from ctx inside main()
+    // immediately after registerLibraryFunctions(ctx). Without this, any
+    // direct-emit'd def that calls puts/len/chr/... would compile-error.
+    let libs = self["resolvedLibraryGlobals"];
+    if (libs != null) {
+        let li = 0;
+        while (li < len(libs)) {
+            puts("var " + mangle(libs[li]) + " Value");
+            li = li + 1;
+        }
+    }
 
     let sdi = 0;
     while (sdi < len(staticDefNames)) {
@@ -5984,6 +6308,20 @@ def programToGoPhase2(self) {
     puts("ctx := NewContext(nil)");
     puts("rootCtx = ctx");
     puts("registerLibraryFunctions(ctx)");
+
+    // Populate the package-scope ij_<libname> Go vars declared at file scope
+    // above. Done here -- right after registerLibraryFunctions(ctx) -- so the
+    // first direct-emit'd impl call site that runs (somewhere inside the
+    // programNode eval below) sees the cached library Values, no ctx.Get
+    // chain walk required.
+    if (libs != null) {
+        let li2 = 0;
+        while (li2 < len(libs)) {
+            puts(mangle(libs[li2]) + " = ctx.Get(" + chr(34) + libs[li2] + chr(34) + ")");
+            li2 = li2 + 1;
+        }
+    }
+
     puts("defer func() {");
     puts("if os.Getenv(" + chr(34) + "IJ_COUNTERS" + chr(34) + ") != " + chr(34) + chr(34) + " {");
     puts("fmt.Fprintf(os.Stderr, " + chr(34) + "[IJ counters] NewContext=%d Create=%d Get=%d Update=%d MapGet=%d MapPut=%d FuncExec=%d NewMap=%d NewArr=%d Promote=%d" + chr(92) + "n" + chr(34) + ", ijCountNewContext, ijCountCreate, ijCountGet, ijCountUpdate, ijCountMapGet, ijCountMapPut, ijCountFuncExec, ijCountNewMap, ijCountNewArr, ijCountCtxPromote)");

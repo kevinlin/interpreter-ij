@@ -269,3 +269,20 @@ real	0m0.032s
 user	0m0.009s
 sys	0m0.017s
 
+=== 2026-05-18T12:28:04Z label=p2.6-d1r-run-n2 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m49.180s
+user	2m45.409s
+sys	0m3.155s
+-- interpreter.sh sample.s --
+
+real	0m0.785s
+user	0m0.961s
+sys	0m0.155s
+-- native_interpreter.sh sample.s --
+
+real	0m0.047s
+user	0m0.008s
+sys	0m0.016s
+
