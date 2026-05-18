@@ -286,3 +286,20 @@ real	0m0.047s
 user	0m0.008s
 sys	0m0.016s
 
+=== 2026-05-18T15:40:22Z label=D1Reborn-N3-stage2 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	4m1.030s
+user	7m5.191s
+sys	0m3.241s
+-- interpreter.sh sample.s --
+
+real	0m1.106s
+user	0m1.847s
+sys	0m0.212s
+-- native_interpreter.sh sample.s --
+
+real	0m0.026s
+user	0m0.011s
+sys	0m0.013s
+

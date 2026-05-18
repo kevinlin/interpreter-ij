@@ -1278,6 +1278,7 @@ def mangle(name) {
 def resolverKindCode(kind, origin) {
     if (kind == "global") {
         if (origin == "lib") { return "rkLib"; }
+        if (origin == "let") { return "rkGlobalLet"; }
         return "rkGlobal";
     }
     if (kind == "local") {
@@ -1497,6 +1498,7 @@ def analyzeIsStatic(node) {
         let kind = node["resolvedKind"];
         let useGoVar = false;
         let isGlobal = false;
+        let isTopLetWrite = false;
         if (origin == "param") { useGoVar = true; }
         if (origin == "let") {
             if (kind == "local" || kind == "captured") { useGoVar = true; }
@@ -1505,10 +1507,18 @@ def analyzeIsStatic(node) {
             if (origin == "lib" || origin == "def" || origin == "let") {
                 useGoVar = true;
                 isGlobal = true;
+                if (origin == "let") { isTopLetWrite = true; }
             }
         }
         if (!useGoVar) { return false; }
-        if (isGlobal) { return false; }
+        // D1-reborn Run N+3: kind=global,origin=let writes are direct-emit-safe
+        // because assignmentStatementToGoDirect dual-writes (Go var + ctx.Update)
+        // and evalAssign's rkGlobalLet case mirrors that for eval-body callers,
+        // so both paths stay coherent. Writes to lib/def globals remain
+        // disallowed -- those have no plumbing path.
+        if (isGlobal) {
+            if (!isTopLetWrite) { return false; }
+        }
     }
 
     let scalarKeys = ["condition","consequence","alternative","body","left","right","collection","index","value","callee","expression","initializer"];
@@ -1687,9 +1697,16 @@ def resolveScopes(ast) {
         ast["resolvedLibraryGlobals"] = libGlobals;
 
         let rootGlobals = [];
+        // D1-reborn Run N+3: top-level `let` names tracked separately so the
+        // emitter can plumb each as a package-level `var ij_<name> Value`
+        // backed by ctx via setTopLetGoVar. Lets direct-emit'd code skip
+        // ctx.Get/Update for top-level mutable globals (currentToken,
+        // peekToken, lexer, tokens, ...).
+        let rootLets = [];
         let stmts = ast["statements"];
         if (stmts == null) {
             ast["resolvedRootGlobals"] = rootGlobals;
+            ast["resolvedRootLets"] = rootLets;
             return rootScope;
         }
         let n = len(stmts);
@@ -1702,6 +1719,7 @@ def resolveScopes(ast) {
                 if (st == "VariableDeclaration") {
                     resolverScopeDeclare(rootScope, stmt["name"], "let");
                     push(rootGlobals, stmt["name"]);
+                    push(rootLets, stmt["name"]);
                 }
                 if (st == "FunctionDeclaration") {
                     resolverScopeDeclare(rootScope, stmt["name"], "def");
@@ -1711,6 +1729,7 @@ def resolveScopes(ast) {
             h = h + 1;
         }
         ast["resolvedRootGlobals"] = rootGlobals;
+        ast["resolvedRootLets"] = rootLets;
 
         let i = 0;
         while (i < n) {
@@ -5287,6 +5306,7 @@ puts("rkParam");
 puts("rkLocal");
 puts("rkUpvalue");
 puts("rkLib");
+puts("rkGlobalLet");
 puts(")");
 puts("type Node struct {");
 puts("kind         uint8");
@@ -5398,6 +5418,15 @@ puts("return v, false");
 puts("case rkLib:");
 puts("rootCtx.UpdateLocal(n.name, v)");
 puts("return v, false");
+puts("case rkGlobalLet:");
+puts("// D1-reborn Run N+3: top-level user `let` writes from the eval-body");
+puts("// path must also update the package-scope Go var so direct-emit'd code");
+puts("// (which reads ij_<name> directly) stays in sync. ctx.Update first so");
+puts("// any non-direct-emit reader sees the new value before setTopLetGoVar");
+puts("// (which is a single Go assignment) updates the Go-var cache.");
+puts("rootCtx.UpdateLocal(n.name, v)");
+puts("setTopLetGoVar(n.name, v)");
+puts("return v, false");
 puts("}");
 puts("if ctx.Exists(n.name) { ctx.Update(n.name, v) } else { ctx.Create(n.name, v) }");
 puts("return v, false");
@@ -5444,6 +5473,10 @@ puts("// A new `let` ALWAYS binds in the current ctx, regardless of how the");
 puts("// resolver classifies the pre-existing name. UpdateLocal is just");
 puts("// Create without the function-call overhead of going through Create.");
 puts("ctx.UpdateLocal(n.name, v)");
+puts("// D1-reborn Run N+3: top-level `let X = ...` runs once at programNode");
+puts("// startup; sync the package-scope Go var so direct-emit'd code observes");
+puts("// the initialised value rather than vNull() (Go zero).");
+puts("if n.resolvedKind == rkGlobalLet { setTopLetGoVar(n.name, v) }");
 puts("return v, false");
 puts("}");
 puts("func evalIf(n *Node, ctx *Context) (Value, bool) {");
@@ -5582,6 +5615,14 @@ let useNodeTree = true;
 // whether to emit nkStaticCall (direct fn pointer) vs nkCall (Value{tag:tFunc}).
 let staticDefNames = [];
 let staticDefByName = {};
+
+// D1-reborn Run N+3: top-level user `let` name set, populated by
+// programToGoPhase2 from ast["resolvedRootLets"] BEFORE collectStaticDefs.
+// canDirectEmit consults it to gate kind=global+origin=let identifier reads /
+// call callees / assignment targets. Membership means "we have package-scope
+// Go-var plumbing for this name" -- absence forces canDirectEmit to reject
+// the def (no Go var to read/write, dual-write would emit invalid Go).
+let topLetSet = {};
 
 // Walk a Program's top-level statements; mark each FunctionDeclaration that is
 //   - resolvedIsStatic   (body has no nested def, no dynamic lookup, no global write)
@@ -5727,6 +5768,19 @@ def canDirectEmit(node) {
         if (kind == "local") { return true; }
         if (kind == "global") {
             if (origin == "lib") { return true; }
+            // D1-reborn Run N+3: top-level `let` reads emit `ij_<name>`
+            // (Go var) when name has plumbing; otherwise reject so the
+            // generated Go does not reference a missing global.
+            if (origin == "let") {
+                if (topLetSet[node["name"]] == true) { return true; }
+                return false;
+            }
+            // D1-reborn Run N+3: bare reference to a top-level def (e.g.
+            // `node["evaluate"] = nullLiteralEvaluate`) emits `ctx.Get("<n>")`
+            // as a safe value-lookup fallback. No package-scope Go var
+            // required -- this slow path costs one map lookup, which is
+            // negligible for AST-construction sites that run once per node.
+            if (origin == "def") { return true; }
             return false;
         }
         return false;
@@ -5745,6 +5799,15 @@ def canDirectEmit(node) {
                         if (corigin == "lib") { ok = true; }
                         if (corigin == "def") {
                             if (staticDefByName[callee["name"]] != null) { ok = true; }
+                        }
+                        // D1-reborn Run N+3: indirect call through a top-level
+                        // let-bound value (e.g. `lexer["nextToken"](lexer)` --
+                        // here the lexer index is the callee, but a bare
+                        // let-bound callable also reaches this branch). Emit
+                        // through Value.Execute -- still skips an evalIdent +
+                        // ctx.Get on the receiver.
+                        if (corigin == "let") {
+                            if (topLetSet[callee["name"]] == true) { ok = true; }
                         }
                     }
                     if (!ok) { return false; }
@@ -5888,27 +5951,44 @@ def identifierToGoDirect(self) {
     // Direct-emit identifiers resolve to Go variables with the `ij_` prefix:
     // - Parameters (resolvedKind=local, resolvedOrigin=param) -> ij_<name> Go
     //   function-scope locals materialised from `args[i]` in the impl prologue.
-    // - Top-level lets / library names (resolvedKind=global) -> ij_<name> Go
-    //   package-scope vars captured in main()'s preamble via ctx.Get(<name>).
+    // - Library names (resolvedKind=global, resolvedOrigin=lib) -> ij_<name>
+    //   Go package-scope vars populated in main() after registerLibraryFunctions.
+    // - Top-level user lets (resolvedKind=global, resolvedOrigin=let) -> ij_<name>
+    //   Go package-scope vars populated by evalVarDecl (rkGlobalLet) when the
+    //   programNode runs the let init AND kept in sync by evalAssign on writes
+    //   from the eval-body path; direct-emit'd assignments dual-write to keep
+    //   the eval-body view (ctx.Get) coherent.
+    // - Bare ref to a top-level def (kind=global, origin=def) -> ctx.Get(<n>)
+    //   slow path. AST-construction code (e.g. `node["evaluate"] = fooEvaluate`)
+    //   stores the value once per node, so the map lookup is negligible.
     // - Block-scope `let`s (resolvedKind=local, resolvedOrigin=let) -> ij_<name>
     //   Go locals declared by `variableDeclarationToGoDirect` in the body.
     // No annotation: fall back to ctx.Get(<name>) so unannotated bootstrap-era
     // AST nodes (or any node the resolver did not visit) still compile.
     let kind = self["resolvedKind"];
+    let origin = self["resolvedOrigin"];
     let nm = self["name"];
     if (kind == "local") {
         print(mangle(nm));
-    } else {
-        if (kind == "global") {
-            print(mangle(nm));
-        } else {
-            // Fallback: unannotated AST nodes go through ctx.Get. The
-            // canDirectEmit predicate normally screens these out before
-            // we get here, so this branch is defense-in-depth. Go signature
-            // is Context.Get(name string) Value -- pass a bare Go string.
-            print("ctx.Get(" + chr(34) + nm + chr(34) + ")");
-        }
+        return null;
     }
+    if (kind == "global") {
+        if (origin == "lib") {
+            print(mangle(nm));
+            return null;
+        }
+        if (origin == "let") {
+            print(mangle(nm));
+            return null;
+        }
+        if (origin == "def") {
+            print("ctx.Get(" + chr(34) + nm + chr(34) + ")");
+            return null;
+        }
+        print(mangle(nm));
+        return null;
+    }
+    print("ctx.Get(" + chr(34) + nm + chr(34) + ")");
 }
 
 def ReturnStatement_toGoDirect(self) {
@@ -6071,6 +6151,24 @@ def variableDeclarationToGoDirect(self) {
 }
 
 def assignmentStatementToGoDirect(self) {
+    let kind = self["resolvedKind"];
+    let origin = self["resolvedOrigin"];
+    // D1-reborn Run N+3: top-level `let` writes from direct-emit'd code
+    // dual-write the package-scope Go var AND ctx, so eval-body readers
+    // (which use ctx.Get) observe the new value. The Go-var write is the
+    // fast read source for direct-emit'd code; ctx.Update keeps the
+    // legacy path coherent. rootCtx is the canonical owner of top-level
+    // lets, so the write goes through rootCtx.UpdateLocal (single map
+    // write, no chain walk).
+    if (kind == "global") {
+        if (origin == "let") {
+            print(mangle(self["name"]) + " = ");
+            nodeToGoDirect(self["value"]);
+            puts("");
+            puts("rootCtx.UpdateLocal(" + chr(34) + self["name"] + chr(34) + ", " + mangle(self["name"]) + ")");
+            return null;
+        }
+    }
     print(mangle(self["name"]) + " = ");
     nodeToGoDirect(self["value"]);
     puts("");
@@ -6215,6 +6313,21 @@ def programToGoPhase2(self) {
     let stmts = self["statements"];
     let n = len(stmts);
 
+    // D1-reborn Run N+3: populate topLetSet from resolved top-level lets so
+    // canDirectEmit (called transitively from collectStaticDefs) can accept
+    // identifier reads / call callees / assignment targets that bind a
+    // top-level user `let`. Done BEFORE collectStaticDefs so the body-coverage
+    // walk sees a complete set.
+    topLetSet = {};
+    let rootLets = self["resolvedRootLets"];
+    if (rootLets != null) {
+        let rli = 0;
+        while (rli < len(rootLets)) {
+            topLetSet[rootLets[rli]] = true;
+            rli = rli + 1;
+        }
+    }
+
     // D2-reborn pre-pass: mark eligible top-level static defs and emit a sibling
     // package-level Go function for each. Direct call-site dispatch
     // (CallExpression_toGo -> nkStaticCall) reads staticDefByName during the
@@ -6237,6 +6350,33 @@ def programToGoPhase2(self) {
             li = li + 1;
         }
     }
+
+    // D1-reborn Run N+3: package-scope Go vars for top-level user lets +
+    // setTopLetGoVar switch. Populated by evalVarDecl (rkGlobalLet) when the
+    // programNode runs the top-level `let X = ...` init expressions, and
+    // updated by evalAssign (rkGlobalLet) on subsequent eval-body writes.
+    // Direct-emit'd code reads `ij_<name>` directly (skipping ctx.Get's chain
+    // walk) and writes via dual-write (ij_<name> = v; ctx.Update(n, v)).
+    if (rootLets != null) {
+        let rli2 = 0;
+        while (rli2 < len(rootLets)) {
+            puts("var " + mangle(rootLets[rli2]) + " Value");
+            rli2 = rli2 + 1;
+        }
+    }
+    puts("func setTopLetGoVar(name string, v Value) {");
+    if (rootLets != null) {
+        if (len(rootLets) > 0) {
+            puts("switch name {");
+            let rli3 = 0;
+            while (rli3 < len(rootLets)) {
+                puts("case " + chr(34) + rootLets[rli3] + chr(34) + ": " + mangle(rootLets[rli3]) + " = v");
+                rli3 = rli3 + 1;
+            }
+            puts("}");
+        }
+    }
+    puts("}");
 
     let sdi = 0;
     while (sdi < len(staticDefNames)) {
@@ -6733,7 +6873,7 @@ def readSources() {
         }
     }
     //puts("Hack:" + source); //DEBUG
-    source;
+    return source;
 }
 
 //TO JSON support start (from mcp)
