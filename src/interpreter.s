@@ -1735,7 +1735,13 @@ def resolveScopes(ast) {
 }
 
 def functionDeclarationToGo(self) {
-    // Phase 2: emit Node tree; evalFuncDecl creates Go closure dynamically
+    // Phase 2: emit Node tree; evalFuncDecl creates Go closure dynamically.
+    // D2-reborn: when this decl was promoted to a sibling ij_<name>_impl Go fn
+    // (collectStaticDefs in programToGoPhase2), the body literal was emitted
+    // once at the top of main() into ij_<name>_body. Reference it by name
+    // here to avoid doubling the emit size; nkFuncDecl still runs so the
+    // ctx[name] = Value{tag:tFunc} binding exists for any indirect-by-value
+    // callers (e.g. `let g = foo; g(42)`).
     print('&Node{kind: nkFuncDecl, name: "' + self["name"] + '", params: []string{');
 
     let params = self["parameters"];
@@ -1751,10 +1757,14 @@ def functionDeclarationToGo(self) {
 
     print('}, body: ');
 
-    let body = self["body"];
-    if (body != null) {
-        if (body["toGo"] != null) {
-            body["toGo"](body);
+    if (self["isStaticPromoted"] == true) {
+        print(mangle(self["name"]) + "_body");
+    } else {
+        let body = self["body"];
+        if (body != null) {
+            if (body["toGo"] != null) {
+                body["toGo"](body);
+            }
         }
     }
 
@@ -3059,9 +3069,34 @@ def CallExpression_toGo(self) {
     let args = self["arguments"];
     let argsLen = len(args);
 
-    print('&Node{kind: nkCall, left: ');
-    callee["toGo"](callee);
-    print(', list: []*Node{');
+    // D2-reborn: if the callee is a name resolving to a top-level static def
+    // that we promoted in collectStaticDefs (resolvedKind=global, origin=def),
+    // emit nkStaticCall with the impl func pointer baked into the Node literal.
+    // This bypasses evalIdent + ctx.Get + FunctionCommand.Execute + ArrayValue
+    // allocation at runtime. resolvedOrigin == "def" is the key gate: it
+    // distinguishes the real top-level def from a let/param/upvalue with the
+    // same name (sequential resolver lookup would have returned origin="let"
+    // or kind="local"/"captured" in that case).
+    let isStaticCall = false;
+    if (callee != null) {
+        if (callee["type"] == "Identifier") {
+            if (callee["resolvedKind"] == "global") {
+                if (callee["resolvedOrigin"] == "def") {
+                    if (staticDefByName[callee["name"]] != null) {
+                        isStaticCall = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (isStaticCall) {
+        print('&Node{kind: nkStaticCall, staticImpl: ' + mangle(callee["name"]) + '_impl, list: []*Node{');
+    } else {
+        print('&Node{kind: nkCall, left: ');
+        callee["toGo"](callee);
+        print(', list: []*Node{');
+    }
 
     let i = 0;
     while (i < argsLen) {
@@ -5226,6 +5261,7 @@ puts("nkArrayLit");
 puts("nkMapLit");
 puts("nkIndex");
 puts("nkCall");
+puts("nkStaticCall");
 puts("nkProgram");
 puts(")");
 puts("const (");
@@ -5271,6 +5307,7 @@ puts("resolvedSlot int32");
 puts("resolvedName string");
 puts("isStatic     bool");
 puts("hasLocals    bool");
+puts("staticImpl   func(*Context, []Value) Value");
 puts("}");
 puts("// --- Phase 2: Tree-walking eval runtime ---");
 puts("func eval(n *Node, ctx *Context) (Value, bool) {");
@@ -5296,6 +5333,7 @@ puts("case nkArrayLit: return evalArrayLit(n, ctx)");
 puts("case nkMapLit: return evalMapLit(n, ctx)");
 puts("case nkIndex: return evalIndex(n, ctx)");
 puts("case nkCall: return evalCall(n, ctx)");
+puts("case nkStaticCall: return evalStaticCall(n, ctx)");
 puts("case nkProgram: return evalProgram(n, ctx)");
 puts("}");
 puts("return vInvalid(" + chr(34) + "unknown node kind" + chr(34) + "), false");
@@ -5463,6 +5501,19 @@ puts("for _, a := range n.list { v, r2 := eval(a, ctx); if r2 { return v, true }
 puts("result := callee.cmd.Execute(ctx, args)");
 puts("return result, false");
 puts("}");
+puts("func evalStaticCall(n *Node, ctx *Context) (Value, bool) {");
+puts("// D2-reborn: callee is a top-level static def known at emit time. Skip");
+puts("// evalIdent + ctx.Get + FunctionCommand.Execute + ArrayValue alloc; jump");
+puts("// directly into the body's evaluator via the baked-in func pointer.");
+puts("args := make([]Value, len(n.list))");
+puts("for i, a := range n.list {");
+puts("v, r := eval(a, ctx)");
+puts("if r { return v, true }");
+puts("if v.tag == tInvalid { return v, false }");
+puts("args[i] = v");
+puts("}");
+puts("return n.staticImpl(ctx, args), false");
+puts("}");
 puts("func evalArrayLit(n *Node, ctx *Context) (Value, bool) {");
 puts("a := NewArrayValue()");
 puts("for _, e := range n.list { v, ret := eval(e, ctx); if ret { return v, true }; a.values = append(a.values, v) }");
@@ -5503,8 +5554,109 @@ puts("");
 // Phase 2: Node tree program emitter — top-level def, captured AST closures stay live
 let useNodeTree = true;
 
+// D2-reborn: top-level static defs eligible for direct-call dispatch.
+// Populated by collectStaticDefs(). staticDefNames is an in-source-order list
+// (required for deterministic emit -- bit-identical fixed-point). staticDefByName
+// is the name->FunctionDeclaration map consulted by CallExpression_toGo to decide
+// whether to emit nkStaticCall (direct fn pointer) vs nkCall (Value{tag:tFunc}).
+let staticDefNames = [];
+let staticDefByName = {};
+
+// Walk a Program's top-level statements; mark each FunctionDeclaration that is
+//   - resolvedIsStatic   (body has no nested def, no dynamic lookup, no global write)
+//   - resolvedAtRoot     (parent scope is the program root -- closure capture is rootCtx)
+//   - single binding     (no other top-level def/let/assign rebinds the same name --
+//                         excludes the `let oldX = X; def X(...) { oldX(...) }` override
+//                         idiom and any future redefinition shape)
+// Eligible defs get isStaticPromoted=true on the AST node, get a top-level Go
+// `func ij_<name>_impl(...) Value` emitted alongside the AST, and get all
+// direct-by-name call sites rewritten to nkStaticCall in the Node tree.
+def collectStaticDefs(stmts) {
+    staticDefNames = [];
+    staticDefByName = {};
+    let n = len(stmts);
+
+    let counts = {};
+    let i = 0;
+    while (i < n) {
+        let s = stmts[i];
+        if (s != null) {
+            let t = s["type"];
+            if (t == "FunctionDeclaration" || t == "VariableDeclaration" || t == "AssignmentStatement") {
+                let nm = s["name"];
+                if (nm != null) {
+                    if (counts[nm] == null) { counts[nm] = 0; }
+                    counts[nm] = counts[nm] + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    // D2-reborn requires only: top-level (resolvedAtRoot) + single binding.
+    // resolvedIsStatic was the D1-inlining predicate (no global writes, no
+    // dynamic lookups so identifiers could be hoisted to Go vars); D2 keeps
+    // the eval(body, local) call path so global writes via ctx.Update and
+    // dynamic lookups via ctx.Get continue to work. Promoting non-static
+    // defs (e.g. parser helpers like nextToken that write top-level state
+    // currentToken/peekToken/currentPosition) is observationally identical
+    // to the closure path while skipping FunctionCommand.Execute indirection.
+    i = 0;
+    while (i < n) {
+        let s = stmts[i];
+        if (s != null) {
+            if (s["type"] == "FunctionDeclaration") {
+                if (s["resolvedAtRoot"] == true) {
+                    if (counts[s["name"]] == 1) {
+                        s["isStaticPromoted"] = true;
+                        push(staticDefNames, s["name"]);
+                        staticDefByName[s["name"]] = s;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
 def programToGoPhase2(self) {
-    // Emit func main() with Node tree + eval()
+    let stmts = self["statements"];
+    let n = len(stmts);
+
+    // D2-reborn pre-pass: mark eligible top-level static defs and emit a sibling
+    // package-level Go function for each. Direct call-site dispatch
+    // (CallExpression_toGo -> nkStaticCall) reads staticDefByName during the
+    // Node-tree emit below; impls are package-level so order between impl emit
+    // and Node-tree emit does not matter, but the body refs they read
+    // (ij_<name>_body) are populated in main() before programNode is built.
+    collectStaticDefs(stmts);
+
+    let sdi = 0;
+    while (sdi < len(staticDefNames)) {
+        let nm = staticDefNames[sdi];
+        puts("var " + mangle(nm) + "_body *Node");
+        sdi = sdi + 1;
+    }
+    sdi = 0;
+    while (sdi < len(staticDefNames)) {
+        let nm = staticDefNames[sdi];
+        let sdef = staticDefByName[nm];
+        let sparams = sdef["parameters"];
+        let spn = len(sparams);
+        puts("func " + mangle(nm) + "_impl(callerCtx *Context, args []Value) Value {");
+        puts("local := NewContext(rootCtx)");
+        let k = 0;
+        while (k < spn) {
+            puts("if " + string(k) + " < len(args) { local.Create(" + chr(34) + sparams[k] + chr(34) + ", args[" + string(k) + "]) }");
+            k = k + 1;
+        }
+        puts("result, _ := eval(" + mangle(nm) + "_body, local)");
+        puts("return result");
+        puts("}");
+        sdi = sdi + 1;
+    }
+
     puts("func main() {");
     puts("if pf := os.Getenv(" + chr(34) + "IJ_CPUPROFILE" + chr(34) + "); pf != " + chr(34) + chr(34) + " {");
     puts("f, err := os.Create(pf)");
@@ -5524,8 +5676,26 @@ def programToGoPhase2(self) {
     puts("}");
     puts("}()");
 
-    let stmts = self["statements"];
-    let n = len(stmts);
+    // Populate each promoted static def's body ref BEFORE the programNode
+    // literal: functionDeclarationToGo emits `body: ij_<name>_body` (a Go var
+    // reference) instead of inline body for promoted defs, so the var must be
+    // set first. The literals are still emitted into ij_<name>_body so eval()
+    // walks them at function-call time -- D2-reborn is a calling-convention
+    // optimisation, not a body-codegen optimisation.
+    sdi = 0;
+    while (sdi < len(staticDefNames)) {
+        let nm = staticDefNames[sdi];
+        let sdef = staticDefByName[nm];
+        print(mangle(nm) + "_body = ");
+        let sbody = sdef["body"];
+        if (sbody != null) {
+            if (sbody["toGo"] != null) {
+                sbody["toGo"](sbody);
+            }
+        }
+        puts("");
+        sdi = sdi + 1;
+    }
 
     print("programNode := &Node{kind: nkProgram, list: []*Node{");
 

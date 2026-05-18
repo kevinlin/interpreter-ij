@@ -4,10 +4,11 @@ Succinct rules for how to BUILD the project:
 
 ```bash
 ./src/compile-local.sh src/interpreter.s /tmp/ij_stage1  # transpile + compile
-# Fresh self-builds now emit a complete func main() (refreshToGoPointers excised).
-# But DO NOT cp /tmp/ij_stage1 interpreter_mac_arm64 yet — stage2 binary's IJ
-# tree-walker has a runtime regression on `let X = scalar` (see IMPLEMENTATION_PLAN
-# P2 blocker). Replacing the committed bridge breaks scripts/test.sh.
+# Fresh self-builds emit a complete func main() and pass tests; D2-reborn source
+# landed (P2.6). BUT stage2 (true fixed-point built by stage1) regresses ~5× on
+# selfhost (e.g. selfhosted sample.s = 7m25s vs stage1's ~1m26s). Cause not yet
+# diagnosed — DO NOT cp /tmp/ij_stage1 interpreter_mac_arm64 permanently until
+# the regression is understood; committed bridge stays as the canonical bridge.
 # If you accidentally overwrite, run `git restore interpreter_mac_arm64`.
 #
 # Quick true-fixed-point check (when ready to verify reproducibility):

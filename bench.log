@@ -235,3 +235,20 @@ real	0m0.023s
 user	0m0.006s
 sys	0m0.010s
 
+=== 2026-05-18T02:11:19Z label=d2-reborn-source-only ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m33.841s
+user	2m27.142s
+sys	0m2.479s
+-- interpreter.sh sample.s --
+
+real	0m0.701s
+user	0m0.894s
+sys	0m0.150s
+-- native_interpreter.sh sample.s --
+
+real	0m0.027s
+user	0m0.008s
+sys	0m0.015s
+
