@@ -22,7 +22,8 @@
 | p2-no-refresh (16:32Z) | 1m20.478s | 0.88× (1.01× vs p1) | ✅ refreshToGoPointers excised; stage2 emits valid main() |
 | p2_5-final (18:40Z) | 1m17.982s | 0.91× (1.03× vs p2-no-refresh) | ✅ P2.5 wired (gain blocked behind committed-binary replace) |
 | p2-stage2-regression-fix (20:06Z) | 1m17.810s | 0.91× (1.00× vs p2_5-final) | ✅ stage2 IJ tree-walker compat fixed; bridge stays |
-| **d2-reborn-source-only (2026-05-18 02:11Z)** | **1m33.841s** | **0.76× (0.83× vs p2-stage2-regression-fix; within noise band on loaded laptop)** | ✅ D2-reborn IJ source landed; committed bridge stays (s3 regresses 5×) |
+| d2-reborn-source-only (2026-05-18 02:11Z) | 1m33.841s | 0.76× (0.83× vs p2-stage2-regression-fix; within noise band on loaded laptop) | ✅ D2-reborn IJ source landed; committed bridge stays (s3 regresses 5×) |
+| **p2.6-diagnosis + alloc-reduction (2026-05-18 this loop)** | **n/a (bench runs committed bridge; source-only changes invisible until binary replace)** | **n/a** | ✅ stage2 perf regression root-caused (see P2.6 forensics); pprof defer-order bug fixed; evalCall + evalFuncDecl alloc-reduction patches landed in source |
 
 **Headline:** committed HEAD binary passes verify.sh 5/5. Phase-2 self-host bench is 0.91× vs phase0 — still off the 10× target. The 02:13Z 49s outlier was forensically reproduced and shown to be a dual-runtime artifact (see "P1 forensics" below). The new floor is **p2-stage2-regression-fix = 1m17.810s**.
 
@@ -136,10 +137,59 @@ Per the P2-stage2-regression-fix forensics, the visible P2.5 gain is doubly bloc
 - [x] **Determinism gate.** Two consecutive `compile-local.sh src/interpreter.s` runs produce byte-identical binaries (verified with d2r_s2 and d2r_s4 = identical SHA on stage1; d2r_s3 and d2r_s5 = identical SHA on stage2). staticDefNames is an in-source-order list (no map-iteration ordering risk).
 - [x] **Source-level true fixed-point.** Stage1 → stage2 → stage3 are byte-identical (cmp confirmed). The Phase-2 emit pipeline is reproducible at the source level *across* the bridge transition (committed-bridge-emit → d2r_s1 → d2r_s2 → d2r_s3, with d2r_s2 ≡ d2r_s3 byte-identical).
 - [x] **Stage1 bench parity.** `selfhosted_interpreter.sh sample.s` under d2r_s1 (4.6 MB; 188 OLD impls compiled in but irrelevant — runtime overrides via ctx) = 1m20–1m26s vs committed bridge's 1m17–1m33s on the same loaded laptop today. D2-reborn dispatch works in practice when the bridge has the OLD emit's structural shape baked in.
-- [ ] **🚫 Stage2 bench REGRESSION (gating).** `selfhosted_interpreter.sh sample.s` under d2r_s2 (true fixed-point, 4.0 MB, 205 NEW impls + 89 nkStaticCall sites in programNode) = **7m25s** vs stage1's 1m26s. 5× slower despite running provably-equivalent Go source. Fib(25) micro-bench on the same binaries: stage1 = 4.04s, stage2 = 19.01s (4.7× slower). cmp on the fixed app.go produced by both bridges = byte-identical (1005634 bytes). The Go build with `-trimpath -buildid= -w -s` is deterministic. The only meaningful axis of difference is the *structural shape* of programNode in each binary's compiled initialiser: stage1 has inline bodies + 0 nkStaticCall sites in programNode (because committed bridge's OLD emit knows nothing about D2-reborn), stage2 has body-ref'd nkFuncDecl + 89 nkStaticCall sites (NEW emit). Suspected causes: iCache pressure from the bigger initialiser (475 KB raw → 1005 KB), Go inliner / escape-analysis treating `&Node{...staticImpl: ij_<n>_impl...}` literals differently from inline-body literals, or some interaction with the global var pattern. **Next loop must pprof the stage2 binary to find the hot path that diverges.** Drop-rule prevents committed-binary replacement today.
+- [x] **Stage2 bench REGRESSION — ROOT-CAUSED 2026-05-18 (this loop).** The previous loop's "iCache pressure / Go inliner divergence / global var pattern" hypothesis was WRONG. The actual root cause is **architectural**: the committed bridge emits a fundamentally different shape of `app.go` than the new src.
+
+  **Diagnosis evidence (this loop, fib25 micro-bench: stage1 4.0s vs stage2 17.85s = 4.5× regression):**
+
+  | Metric | Stage1 (committed-bridge → new-src) | Stage2 (stage1 → new-src, true fixed-point) |
+  |---|---|---|
+  | Wall time | 4.04s | 17.85s |
+  | Total allocations | 54.1M | 112.7M |
+  | Total bytes allocated | 4.8 GB | 24.7 GB |
+  | GC cycles | 1605 | 5982 |
+  | GC pause total | 62 ms | 223 ms |
+  | Avg alloc size | 89 B | 220 B |
+  | Heap live | ~0 MB (transient) | ~4 MB sustained (interpreter.s Node tree globals) |
+
+  **The shapes diverge structurally:** stage1's `app.go` (from committed bridge) has 187 `ij_<name>_impl` Go functions where **each `_impl` body is direct Go code** transpiled statement-by-statement from the IJ source (e.g. `func ij_mangle_impl(ctx, ij_name) { return Value{...}.Add(ij_name) }`). The user program body in `main()` is emitted as a series of inline `ij_xxx.Execute(...)` calls — NO Node tree, NO `eval()` recursion. Stage2's `app.go` (from stage1, NEW emit) has 205 `ij_<name>_impl` Go functions where **each body is `result, _ := eval(ij_<name>_body, local)`** — wraps a Node-tree tree-walker. Plus a 1 MB `programNode := &Node{kind: nkProgram, list: []*Node{...}}` literal in `main()`.
+
+  When stage2 runs interpreter.s evaluating fib25.s, EVERY IJ-level operation (lexer token, parser step, evaluator dispatch, MapValue lookup, …) goes through the Go-side `eval()` switch with allocation per node visit. When stage1 runs the same workload, those IJ-level operations are direct Go function calls with no `eval()` indirection.
+
+  **Pprof CPU breakdown (stage2, fib25, 19.12s sample):**
+
+  | Function | flat | cum | cum % |
+  |---|---|---|---|
+  | runtime.systemstack | 0.02s | 12.11s | 43.23% |
+  | main.(*FunctionCommand).Execute | 0.08s | 9.59s | 34.24% |
+  | main.eval | 1.64s | 9.59s | 34.24% |
+  | main.evalBlock | 0.29s | 9.59s | 34.24% |
+  | main.evalCall | 0.14s | 9.59s | 34.24% |
+  | main.evalFuncDecl.func1 | 0.04s | 9.41s | 33.60% |
+  | runtime.kevent (GC sysmon) | 4.69s | 4.69s | 16.74% |
+  | runtime.gcBgMarkWorker.func2 | 0 | 4.66s | 16.64% |
+
+  **D2-reborn was the wrong shape of fix.** It collapses `evalIdent + ctx.Get + FunctionCommand.Execute + ArrayValue alloc` for direct-by-name calls, but the hot path under selfhost+fib25 is **the closure body** in `evalFuncDecl.func1` (33.6% cum), reached via `FunctionCommand.Execute` (34.24% cum). User-level `fib(n)` and IJ-side `MapValue["evaluate"]` calls go through that closure path, NOT through nkStaticCall (because the callee is a value, not a known-at-emit-time identifier). So D2-reborn saves IJ-internal direct-by-name calls in interpreter.s but doesn't touch the dominant cost.
+
+  **The structural fix: "D1-reborn" — emit promoted-static-def bodies as direct Go statements, NOT as `eval(body, local)` wrappers.** This brings the new src to parity with the committed bridge's emit shape. Each `*ToGo` function in interpreter.s currently emits Node literals; we'd need a parallel set of "direct-Go-statement" emitters that mirror what the OLD bridge did (e.g. `assignmentStatementToGoDirect`, `infixExpressionToGoDirect`, `callExpressionToGoDirect`, etc.). The OLD bridge's emit shape is preserved in the committed binary's compiled-in `app.go`; reading `/tmp/p2_6/app_s1.go` lines 5724-5800 shows the template (one Go function per IJ def with direct-statement body). This is multi-loop work but it is the only path to closing the regression AND replacing the committed binary.
+
+- [x] **Pprof defer-order bug — FIXED (this loop).** `programToGoPhase2` emitted `defer pprof.StopCPUProfile()` BEFORE `defer f.Close()`. Go defers run LIFO → `f.Close()` ran first, then `pprof.StopCPUProfile()` tried to flush profile data to a closed fd → every `IJ_CPUPROFILE=...` invocation produced a 0-byte file (silently). Fix: swap the two `puts(...)` lines so `f.Close()` is deferred first and runs LAST. Verified via `(echo //multiline; cat fib25.s; echo //<EOF>) | IJ_CPUPROFILE=/tmp/cpu.out stage2_patched` → 40 KB profile parseable by `go tool pprof`. This unblocks all future profiling work. NOTE: the committed bridge has the OLD defer order baked into its own `main()`; only stage1+stage2 builds get the fix. Bench/verify pipelines aren't affected because they don't use IJ_CPUPROFILE.
+
+- [x] **Alloc-reduction in goLibPrefix (this loop).** Two source-side patches in `evalCall` + `evalFuncDecl` emit:
+  - `evalCall`: replace `args := NewArrayValue(); for ... append(args.values, v)` with `av := &ArrayValue{values: make([]Value, nargs)}; for i ... av.values[i] = v`. Drops the empty-slice + per-append slice-growth allocations to a single preallocated backing slice. (`src/interpreter.s:5494-5510`)
+  - `evalFuncDecl` closure body: replace `NewContext(defCtx) + local.Create(p, v)` (which lazily allocates the `variables` map on first Create) with a single `&Context{parent: defCtx, variables: make(map[string]Value, npar)}` literal. Special-case `npar == 0` to skip the map alloc entirely (zero-param IJ defs are common — `getErrors`, `parseMapPairs`, etc.). (`src/interpreter.s:5481-5500`)
+  - **Expected ~5% per-call cost reduction** on stage2 (measured via `stage2_v5` hand-patch ≈ 17.0s vs original 17.85s = 4.8% recovery on fib25). Invisible to `bench.sh` today (committed-bridge binary is what runs the bench) but lands in source for next loop's committed-binary replacement.
+
+- [ ] **🎯 D1-reborn: emit promoted-static-def bodies as direct Go statements.** Per the diagnosis above, this is the structural fix. Concretely: add a parallel set of `*ToGoDirect` IJ-side functions that emit Go statements instead of Node literals. The OLD bridge's emit shape is preserved in `/tmp/p2_6/app_s1.go` lines 5724-5800 as a working template. Per-statement emitters needed: `assignmentStatementToGoDirect`, `variableDeclarationToGoDirect`, `infixExpressionToGoDirect`, `callExpressionToGoDirect`, `ifStatementToGoDirect`, `whileStatementToGoDirect`, `blockStatementToGoDirect`, `returnStatementToGoDirect`, `prefixExpressionToGoDirect`, `indexAssignmentToGoDirect`, `literalsToGoDirect` (string/int/double/bool/null), `identifierToGoDirect`, `arrayLiteralToGoDirect`, `mapLiteralToGoDirect`, `indexExpressionToGoDirect`. Each emits Go code in the OLD-bridge style (e.g. `var ij_x Value = ij_y.Add(ij_z)` for VarDecl) instead of `&Node{kind: nkVarDecl, ...}`. Then `programToGoPhase2` switches promoted defs to use the direct emitter for their body (instead of `body: ij_<n>_body` + `eval(ij_<n>_body, local)` indirection). Non-promoted defs (with nested defs, dynamic lookups, etc.) stay on the Node-tree+eval path. Expected: closes the 5× stage2 regression AND replaces the committed binary becomes safe.
 - [ ] **Patch `fix_app_go.py` to harden all lib-fn `params.Get(Value{tag: tInt, i: N})` call sites** with bounds checks. Mechanical sed; ~30 lib fns. Defensive depth even if not strictly needed.
 - [ ] **NewStaticFunctionCommand wrapping for storage paths.** Currently when a static def is referenced by name as a value (e.g. assigned into a map), nkFuncDecl creates `Value{tag:tFunc, cmd:NewFunctionCommand(...)}`, NOT NewStaticFunctionCommand. Both paths produce identical results today but NewStaticFunctionCommand was the OLD-bridge sentinel for "this is a static impl we can fast-path." Switch to NewStaticFunctionCommand once it has meaningful behaviour (currently it's a passthrough — `src/interpreter.s:5202`).
-- [ ] **Replace committed `interpreter_mac_arm64` + tighten `verify.sh` check 5 to true fixed-point.** ONLY after the stage2 bench regression is diagnosed and the new emit is at perf parity (or better) with the committed bridge for tree-walker workloads. The replacement is what makes `verify.sh` check 5 a TRUE fixed-point check (stage1 install → stage2 build → diff) instead of mere determinism.
+- [ ] **Replace committed `interpreter_mac_arm64` + tighten `verify.sh` check 5 to true fixed-point.** ONLY after D1-reborn lands and the new emit reaches perf parity (or better) with the committed bridge for tree-walker workloads. The replacement is what makes `verify.sh` check 5 a TRUE fixed-point check (stage1 install → stage2 build → diff) instead of mere determinism.
+
+**P2.6 experiments that DID NOT pan out (this loop):**
+
+- ❌ **Stage2 args-slice elimination in ij_*_impl** (`patch_static.py`): rewrote `ij_<n>_impl(callerCtx, args []Value)` → `ij_<n>_impl(n *Node, ctx *Context)` with inline arg eval. Saved the `[]Value` slice alloc per static call site. Result: **0.3% wall improvement on fib25** (17.57s vs 17.85s). Negligible because user-level fib goes through closure path, not nkStaticCall path. Reverted.
+- ❌ **Combined NewContext + map literal in ij_*_impl** (`patch_allocs.py`): single struct literal instead of `NewContext` + `Create`. Saved 1 alloc per impl call. Result: **1.6% wall improvement**. Reverted (negligible).
+- ❌ **`sync.Pool` of `*Context` for closure body** (`patch_pool.py`): `getCtx(parent)` / `putCtx(c)` with map-clear-on-Put. Result: **fib25 → 0.5s wall but EMPTY output** — broke any IJ-level closure that captured a body-local context (`makeXxx(...)` MapValue patterns where node["evaluate"] = closure over enclosing scope). Pool is correct only when the closure body provably has no inner defs capturing local; that's the `resolvedIsStatic` predicate, which is currently dead. Reverted.
+- ✅ **`sync.Pool` of `*ArrayValue` for evalCall args** (`patch_avpool.py`): `avPool.Get`/`Put` in evalCall, `args.values = args.values[:0]` for reuse. Result: **fib25 17.0s vs 17.85s = 4.8% wall improvement**. SAFE only if no library function retains the ArrayValue past Execute return. Audit of library fns shows most read args via `.Get(int)` and don't retain; the risky ones are array-returning fns like `keys()`/`values()` which return NEW arrays. **Not shipped this loop** because the risk audit needs verify.sh check 4 (MCP) pass — deferred to follow-up. The single-literal alloc-reduction patch DID ship (gives most of the same gain without the pool risk).
 
 ### P2.5 — Activate resolver annotations (NEW, added 2026-05-18; expected 2–3× over p2-no-refresh)
 

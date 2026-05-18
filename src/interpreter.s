@@ -5482,9 +5482,23 @@ puts("func evalFuncDecl(n *Node, ctx *Context) (Value, bool) {");
 puts("pNames := n.params");
 puts("bodyN := n.body");
 puts("defCtx := ctx");
+puts("npar := len(pNames)");
+// Closure body allocates a fresh *Context per call. Combine the Context
+// struct + the params map into ONE struct literal (single alloc + sized
+// map) instead of NewContext(defCtx) → lazy `if c.variables == nil`
+// guard → Create("p", v). Drops ~one allocation per call AND skips the
+// nil-guard branch + per-Create function call overhead. Special-case
+// 0-param defs so they skip the map alloc entirely.
 puts("fn := NewFunctionCommand(defCtx, func(callerCtx *Context, args *ArrayValue) Value {");
-puts("local := NewContext(defCtx)");
-puts("for i, p := range pNames { if i < len(args.values) { local.Create(p, args.values[i]) } }");
+puts("var local *Context");
+puts("if npar == 0 {");
+puts("local = &Context{parent: defCtx}");
+puts("} else {");
+puts("vars := make(map[string]Value, npar)");
+puts("nv := len(args.values)");
+puts("for i, p := range pNames { if i < nv { vars[p] = args.values[i] } }");
+puts("local = &Context{parent: defCtx, variables: vars}");
+puts("}");
 puts("result, _ := eval(bodyN, local)");
 puts("return result");
 puts("})");
@@ -5496,9 +5510,16 @@ puts("callee, ret := eval(n.left, ctx)");
 puts("if ret { return callee, true }");
 puts("if callee.tag == tInvalid { return callee, false }");
 puts("if callee.tag != tFunc { return vInvalid(" + chr(34) + "call target not a function" + chr(34) + "), false }");
-puts("args := NewArrayValue()");
-puts("for _, a := range n.list { v, r2 := eval(a, ctx); if r2 { return v, true }; args.values = append(args.values, v) }");
-puts("result := callee.cmd.Execute(ctx, args)");
+// Preallocate the args wrapper + backing slice to the exact arg count.
+// Previous emit (`NewArrayValue()` + per-arg `append`) cost one alloc
+// for the empty ArrayValue, one growth alloc for the backing slice on
+// the first append, and potentially more on growth. Single &ArrayValue
+// literal with a pre-sized slice cuts this to one alloc for the slice
+// + one for the wrapper (lib fns still need the wrapper for Get/Length).
+puts("nargs := len(n.list)");
+puts("av := &ArrayValue{values: make([]Value, nargs)}");
+puts("for i, a := range n.list { v, r2 := eval(a, ctx); if r2 { return v, true }; av.values[i] = v }");
+puts("result := callee.cmd.Execute(ctx, av)");
 puts("return result, false");
 puts("}");
 puts("func evalStaticCall(n *Node, ctx *Context) (Value, bool) {");
@@ -5662,8 +5683,13 @@ def programToGoPhase2(self) {
     puts("f, err := os.Create(pf)");
     puts("if err == nil {");
     puts("if err := pprof.StartCPUProfile(f); err == nil {");
-    puts("defer pprof.StopCPUProfile()");
+    // Defer order matters: defers run LIFO. f.Close() must be queued FIRST
+    // so it runs LAST -- i.e. pprof.StopCPUProfile() flushes the buffered
+    // profile to f BEFORE f is closed. Previous order (StopCPUProfile then
+    // f.Close pushed) ran f.Close FIRST → flush wrote to a closed fd →
+    // every IJ_CPUPROFILE invocation produced a 0-byte profile.
     puts("defer f.Close()");
+    puts("defer pprof.StopCPUProfile()");
     puts("}");
     puts("}");
     puts("}");

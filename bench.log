@@ -252,3 +252,20 @@ real	0m0.027s
 user	0m0.008s
 sys	0m0.015s
 
+=== 2026-05-18T06:12:06Z label=p2.6-diagnosis-alloc-reduction ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m37.904s
+user	2m28.284s
+sys	0m4.025s
+-- interpreter.sh sample.s --
+
+real	0m0.756s
+user	0m0.894s
+sys	0m0.176s
+-- native_interpreter.sh sample.s --
+
+real	0m0.032s
+user	0m0.009s
+sys	0m0.017s
+
