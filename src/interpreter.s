@@ -5632,12 +5632,136 @@ def collectStaticDefs(stmts) {
                         s["isStaticPromoted"] = true;
                         push(staticDefNames, s["name"]);
                         staticDefByName[s["name"]] = s;
+                        // D1-reborn: opt promoted defs into direct-Go-statement
+                        // body emit when their name is in the allowlist AND the
+                        // resolver classified them as fully static (no nested
+                        // defs, no dynamic lookups, no global writes). The static
+                        // predicate matters here -- direct emit lowers ctx
+                        // reads/writes onto Go locals, so any IJ statement that
+                        // depends on per-call ctx semantics (assignment fall-
+                        // through, captured-by-inner-def, ctx.Exists-style
+                        // dynamic lookup) would silently miscompile.
+                        if (s["resolvedIsStatic"] == true) {
+                            if (directEmitAllowlist[s["name"]] == true) {
+                                s["useDirectEmit"] = true;
+                            }
+                        }
                     }
                 }
             }
         }
         i = i + 1;
     }
+    return null;
+}
+
+// D1-reborn allowlist. MVP scope: one leaf def (`nullLiteralEvaluate`) whose
+// body is `return null;` -- exercises the impl prologue + epilogue, block,
+// return, and null-literal direct emitters end-to-end. Subsequent runs grow
+// this list as more `*ToGoDirect` emitters land.
+let directEmitAllowlist = {};
+directEmitAllowlist["nullLiteralEvaluate"] = true;
+
+// D1-reborn per-node-kind direct emitters. Each prints raw Go statement or
+// expression text (no `&Node{...}` literals). Call sites are reached through
+// the central `nodeToGoDirect` dispatcher; opt-in is per-def via the
+// `useDirectEmit` flag set in `collectStaticDefs`. See
+// `docs/research/2026-05-18-d1-reborn-emit-template.md` for the per-statement
+// mapping these emitters mirror.
+
+def nullLiteralToGoDirect(self) {
+    print("vNull()");
+}
+
+def toGoBooleanLiteralDirect(self) {
+    if (self["value"]) {
+        print("Value{tag: tBool, b: true}");
+    } else {
+        print("Value{tag: tBool, b: false}");
+    }
+}
+
+def numberLiteralToGoDirect(self) {
+    let str = string(self["value"]);
+    let i = 0;
+    let isDouble = false;
+    while (i < len(str)) {
+        if (char(str, i) == ".") {
+            isDouble = true;
+        }
+        i = i + 1;
+    }
+    if (isDouble) {
+        print("Value{tag: tDouble, d: " + str + "}");
+    } else {
+        print("Value{tag: tInt, i: " + str + "}");
+    }
+}
+
+def stringLiteralToGoDirect(self) {
+    print("Value{tag: tString, s: " + chr(34) + escapeGoStringLiteral(self["value"]) + chr(34) + "}");
+}
+
+def identifierToGoDirect(self) {
+    // Direct-emit identifiers resolve to Go variables with the `ij_` prefix:
+    // - Parameters (resolvedKind=local, resolvedOrigin=param) -> ij_<name> Go
+    //   function-scope locals materialised from `args[i]` in the impl prologue.
+    // - Top-level lets / library names (resolvedKind=global) -> ij_<name> Go
+    //   package-scope vars captured in main()'s preamble via ctx.Get(<name>).
+    // - Block-scope `let`s (resolvedKind=local, resolvedOrigin=let) -> ij_<name>
+    //   Go locals declared by `variableDeclarationToGoDirect` in the body.
+    // No annotation: fall back to ctx.Get(<name>) so unannotated bootstrap-era
+    // AST nodes (or any node the resolver did not visit) still compile.
+    let kind = self["resolvedKind"];
+    let nm = self["name"];
+    if (kind == "local") {
+        print(mangle(nm));
+    } else {
+        if (kind == "global") {
+            print(mangle(nm));
+        } else {
+            print("ctx.Get(Value{tag: tString, s: " + chr(34) + nm + chr(34) + "})");
+        }
+    }
+}
+
+def ReturnStatement_toGoDirect(self) {
+    if (self["value"] != null) {
+        print("return ");
+        nodeToGoDirect(self["value"]);
+        puts("");
+    } else {
+        puts("return vNull()");
+    }
+}
+
+def blockStatementToGoDirect(self) {
+    puts("{");
+    puts("_ = ctx");
+    let stmts = self["statements"];
+    let n = len(stmts);
+    let i = 0;
+    while (i < n) {
+        nodeToGoDirect(stmts[i]);
+        i = i + 1;
+    }
+    puts("}");
+}
+
+// Dispatcher: route by AST node type. Unknown / unsupported kinds emit a
+// sentinel that fails the Go build loudly so a mistakenly-opt'd-in def is
+// caught at `compile-local.sh` time rather than silently miscompiling.
+def nodeToGoDirect(node) {
+    if (node == null) { return null; }
+    let t = node["type"];
+    if (t == "NullLiteral") { nullLiteralToGoDirect(node); return null; }
+    if (t == "BooleanLiteral") { toGoBooleanLiteralDirect(node); return null; }
+    if (t == "NumberLiteral") { numberLiteralToGoDirect(node); return null; }
+    if (t == "StringLiteral") { stringLiteralToGoDirect(node); return null; }
+    if (t == "Identifier") { identifierToGoDirect(node); return null; }
+    if (t == "BlockStatement") { blockStatementToGoDirect(node); return null; }
+    if (t == "ReturnStatement") { ReturnStatement_toGoDirect(node); return null; }
+    puts("D1R_UNSUPPORTED_NODE_KIND_" + t + " // direct-emit fallback -- forces build failure");
     return null;
 }
 
@@ -5666,14 +5790,41 @@ def programToGoPhase2(self) {
         let sparams = sdef["parameters"];
         let spn = len(sparams);
         puts("func " + mangle(nm) + "_impl(callerCtx *Context, args []Value) Value {");
-        puts("local := NewContext(rootCtx)");
-        let k = 0;
-        while (k < spn) {
-            puts("if " + string(k) + " < len(args) { local.Create(" + chr(34) + sparams[k] + chr(34) + ", args[" + string(k) + "]) }");
-            k = k + 1;
+        if (sdef["useDirectEmit"] == true) {
+            // D1-reborn direct-Go-statement impl. Skips the eval(body, local)
+            // tree-walker entirely; parameters live as Go function-scope
+            // locals, ctx-using statements (library calls, ctx.Get fallbacks)
+            // see the caller's ctx aliased as `ctx`. Body block emits its own
+            // `_ = ctx` and per-statement direct Go via nodeToGoDirect. The
+            // companion Node-tree body still lives in ij_<name>_body so
+            // indirect callers (Value{tag:tFunc} stored in a map, then called
+            // by value) keep working through the closure path.
+            puts("ctx := callerCtx");
+            puts("_ = ctx");
+            let k = 0;
+            while (k < spn) {
+                puts("var " + mangle(sparams[k]) + " Value");
+                puts("if " + string(k) + " < len(args) { " + mangle(sparams[k]) + " = args[" + string(k) + "] }");
+                puts("_ = " + mangle(sparams[k]));
+                k = k + 1;
+            }
+            puts("var result Value = vNull()");
+            puts("_ = result");
+            let sbody = sdef["body"];
+            if (sbody != null) {
+                nodeToGoDirect(sbody);
+            }
+            puts("return result");
+        } else {
+            puts("local := NewContext(rootCtx)");
+            let k = 0;
+            while (k < spn) {
+                puts("if " + string(k) + " < len(args) { local.Create(" + chr(34) + sparams[k] + chr(34) + ", args[" + string(k) + "]) }");
+                k = k + 1;
+            }
+            puts("result, _ := eval(" + mangle(nm) + "_body, local)");
+            puts("return result");
         }
-        puts("result, _ := eval(" + mangle(nm) + "_body, local)");
-        puts("return result");
         puts("}");
         sdi = sdi + 1;
     }
