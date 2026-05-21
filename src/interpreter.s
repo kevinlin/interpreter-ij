@@ -6413,7 +6413,34 @@ def programToGoPhase2(self) {
             puts("_ = result");
             let sbody = sdef["body"];
             if (sbody != null) {
-                nodeToGoDirect(sbody);
+                if (sbody["type"] == "BlockStatement") {
+                    puts("{");
+                    puts("_ = ctx");
+                    let bodyStmts = sbody["statements"];
+                    let bn = len(bodyStmts);
+                    let bi = 0;
+                    while (bi < bn) {
+                        if (bi == bn - 1) {
+                            let lastStmt = bodyStmts[bi];
+                            if (lastStmt["type"] == "ExpressionStatement") {
+                                let expr = lastStmt["expression"];
+                                if (expr != null) {
+                                    print("result = ");
+                                    nodeToGoDirect(expr);
+                                    puts("");
+                                }
+                            } else {
+                                nodeToGoDirect(lastStmt);
+                            }
+                        } else {
+                            nodeToGoDirect(bodyStmts[bi]);
+                        }
+                        bi = bi + 1;
+                    }
+                    puts("}");
+                } else {
+                    nodeToGoDirect(sbody);
+                }
             }
             puts("return result");
         } else {
