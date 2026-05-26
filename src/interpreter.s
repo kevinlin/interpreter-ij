@@ -3110,7 +3110,7 @@ def CallExpression_toGo(self) {
     }
 
     if (isStaticCall) {
-        print('&Node{kind: nkStaticCall, staticImpl: ' + mangle(callee["name"]) + '_impl, list: []*Node{');
+        print('&Node{kind: nkStaticCall, staticImpl: ' + mangle(callee["name"]) + '_impl_wrapper, list: []*Node{');
     } else {
         print('&Node{kind: nkCall, left: ');
         callee["toGo"](callee);
@@ -6100,14 +6100,34 @@ def CallExpression_toGoDirect(self) {
     }
 
     if (isStaticCall) {
-        print(mangle(callee["name"]) + "_impl(ctx, []Value{");
-        let i = 0;
-        while (i < argsLen) {
-            if (i > 0) { print(", "); }
-            nodeToGoDirect(args[i]);
-            i = i + 1;
+        // Use positional-arg call when callee is a direct-emit def (no []Value alloc).
+        // Eval-body promoted defs keep the []Value convention.
+        let calleeData = staticDefByName[callee["name"]];
+        let calleeIsDirectEmit = false;
+        if (calleeData != null) {
+            if (calleeData["useDirectEmit"] == true) {
+                calleeIsDirectEmit = true;
+            }
         }
-        print("})");
+        if (calleeIsDirectEmit) {
+            print(mangle(callee["name"]) + "_impl(ctx");
+            let i = 0;
+            while (i < argsLen) {
+                print(", ");
+                nodeToGoDirect(args[i]);
+                i = i + 1;
+            }
+            print(")");
+        } else {
+            print(mangle(callee["name"]) + "_impl(ctx, []Value{");
+            let i = 0;
+            while (i < argsLen) {
+                if (i > 0) { print(", "); }
+                nodeToGoDirect(args[i]);
+                i = i + 1;
+            }
+            print("})");
+        }
     } else {
         print("(");
         nodeToGoDirect(callee);
@@ -6390,22 +6410,24 @@ def programToGoPhase2(self) {
         let sdef = staticDefByName[nm];
         let sparams = sdef["parameters"];
         let spn = len(sparams);
-        puts("func " + mangle(nm) + "_impl(callerCtx *Context, args []Value) Value {");
         if (sdef["useDirectEmit"] == true) {
-            // D1-reborn direct-Go-statement impl. Skips the eval(body, local)
-            // tree-walker entirely; parameters live as Go function-scope
-            // locals, ctx-using statements (library calls, ctx.Get fallbacks)
-            // see the caller's ctx aliased as `ctx`. Body block emits its own
-            // `_ = ctx` and per-statement direct Go via nodeToGoDirect. The
-            // companion Node-tree body still lives in ij_<name>_body so
-            // indirect callers (Value{tag:tFunc} stored in a map, then called
-            // by value) keep working through the closure path.
-            puts("ctx := callerCtx");
-            puts("_ = ctx");
+            // D1-reborn positional-arg direct-Go-statement impl.
+            // Signature: func ij_<n>_impl(callerCtx *Context, ij_p1 Value, ...) Value
+            // Skips the eval(body, local) tree-walker entirely and the []Value
+            // args-slice alloc at direct call sites. A companion _impl_wrapper
+            // with the uniform (ctx, args []Value) signature is emitted below for
+            // nkStaticCall and other indirect paths.
+            print("func " + mangle(nm) + "_impl(callerCtx *Context");
             let k = 0;
             while (k < spn) {
-                puts("var " + mangle(sparams[k]) + " Value");
-                puts("if " + string(k) + " < len(args) { " + mangle(sparams[k]) + " = args[" + string(k) + "] }");
+                print(", " + mangle(sparams[k]) + " Value");
+                k = k + 1;
+            }
+            puts(") Value {");
+            puts("ctx := callerCtx");
+            puts("_ = ctx");
+            k = 0;
+            while (k < spn) {
                 puts("_ = " + mangle(sparams[k]));
                 k = k + 1;
             }
@@ -6443,7 +6465,26 @@ def programToGoPhase2(self) {
                 }
             }
             puts("return result");
+            puts("}");
+            // Wrapper: uniform (ctx, args []Value) interface for nkStaticCall.
+            // Unpacks the slice into positional args before calling _impl.
+            puts("func " + mangle(nm) + "_impl_wrapper(callerCtx *Context, args []Value) Value {");
+            k = 0;
+            while (k < spn) {
+                puts("var _wa" + string(k) + " Value; if " + string(k) + " < len(args) { _wa" + string(k) + " = args[" + string(k) + "] }");
+                k = k + 1;
+            }
+            print("return " + mangle(nm) + "_impl(callerCtx");
+            k = 0;
+            while (k < spn) {
+                print(", _wa" + string(k));
+                k = k + 1;
+            }
+            puts(")");
+            puts("}");
         } else {
+            // Eval-body impl: uniform (ctx, args []Value) slice convention.
+            puts("func " + mangle(nm) + "_impl(callerCtx *Context, args []Value) Value {");
             puts("local := NewContext(rootCtx)");
             let k = 0;
             while (k < spn) {
@@ -6452,8 +6493,12 @@ def programToGoPhase2(self) {
             }
             puts("result, _ := eval(" + mangle(nm) + "_body, local)");
             puts("return result");
+            puts("}");
+            // Wrapper just forwards the slice (Go inliner likely eliminates the call).
+            puts("func " + mangle(nm) + "_impl_wrapper(callerCtx *Context, args []Value) Value {");
+            puts("return " + mangle(nm) + "_impl(callerCtx, args)");
+            puts("}");
         }
-        puts("}");
         sdi = sdi + 1;
     }
 
