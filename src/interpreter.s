@@ -6102,14 +6102,25 @@ def CallExpression_toGoDirect(self) {
     if (isStaticCall) {
         // Use positional-arg call when callee is a direct-emit def (no []Value alloc).
         // Eval-body promoted defs keep the []Value convention.
+        //
+        // ARITY: IJ tolerates extra/missing args at call sites (the
+        // closure-path Execute drops extras and defaults missing to vNull).
+        // Positional-arg Go calls cannot — Go enforces arity. Fall back to
+        // the _impl_wrapper []Value path when caller-arg-count != callee-
+        // param-count so semantic parity holds (wrapper does pad/truncate).
         let calleeData = staticDefByName[callee["name"]];
         let calleeIsDirectEmit = false;
+        let calleeArity = 0;
         if (calleeData != null) {
             if (calleeData["useDirectEmit"] == true) {
                 calleeIsDirectEmit = true;
             }
+            let cps = calleeData["parameters"];
+            if (cps != null) {
+                calleeArity = len(cps);
+            }
         }
-        if (calleeIsDirectEmit) {
+        if (calleeIsDirectEmit && argsLen == calleeArity) {
             print(mangle(callee["name"]) + "_impl(ctx");
             let i = 0;
             while (i < argsLen) {
@@ -6119,7 +6130,11 @@ def CallExpression_toGoDirect(self) {
             }
             print(")");
         } else {
-            print(mangle(callee["name"]) + "_impl(ctx, []Value{");
+            if (calleeIsDirectEmit) {
+                print(mangle(callee["name"]) + "_impl_wrapper(ctx, []Value{");
+            } else {
+                print(mangle(callee["name"]) + "_impl(ctx, []Value{");
+            }
             let i = 0;
             while (i < argsLen) {
                 if (i > 0) { print(", "); }

@@ -4,12 +4,21 @@ Succinct rules for how to BUILD the project:
 
 ```bash
 ./src/compile-local.sh src/interpreter.s /tmp/ij_stage1  # transpile + compile
-# Fresh self-builds emit a complete func main() and pass tests; D2-reborn source
-# landed (P2.6). BUT stage2 (true fixed-point built by stage1) regresses ~5× on
-# selfhost (e.g. selfhosted sample.s = 7m25s vs stage1's ~1m26s). Cause not yet
-# diagnosed — DO NOT cp /tmp/ij_stage1 interpreter_mac_arm64 permanently until
-# the regression is understood; committed bridge stays as the canonical bridge.
+# Fresh self-builds emit a complete func main() and pass tests; D1-reborn N+5
+# (positional-arg calling convention) source landed (P2.6, 2026-05-27).
+# Stage1 (committed bridge → new src) is at PARITY (~1m45s selfhost sample.s).
+# BUT stage2 (true fixed-point built by stage1) still regresses ~2.4× on
+# selfhost (4m15s vs stage1 1m45s, 2026-05-27 measurement). Root cause:
+# MapValue["evaluate"] closure dispatch dominates — Run N+5 didn't help it.
+# Run N+6 (closure-body hoist or call-site specialisation) is the next lever.
+# DO NOT cp /tmp/ij_stage1 interpreter_mac_arm64 permanently until stage2
+# selfhost drops below ~2m; committed bridge stays as the canonical bridge.
 # If you accidentally overwrite, run `git restore interpreter_mac_arm64`.
+#
+# ARITY GOTCHA: positional-arg conv enforces Go arity. IJ source tolerates
+# caller-arity != callee-arity (extras dropped, missings vNull-pad).
+# CallExpression_toGoDirect falls back to _impl_wrapper([]Value{...}) when
+# they mismatch. If you add a new direct-emit code path, preserve this.
 #
 # Quick true-fixed-point check (when ready to verify reproducibility):
 #   ./src/compile-local.sh src/interpreter.s /tmp/s1

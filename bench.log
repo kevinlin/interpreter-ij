@@ -49,22 +49,7 @@ real	0m0.038s
 user	0m0.006s
 sys	0m0.011s
 -- selfhosted_interpreter.sh bench_eval.s --
-=== 2026-05-17T02:13:13Z label=run ===
--- selfhosted_interpreter.sh sample.s (stdin=hi) --
 
-real	0m49.274s
-user	2m8.282s
-sys	0m2.224s
--- interpreter.sh test.s --
-
-real	0m0.521s
-user	0m0.987s
-sys	0m0.152s
--- native_interpreter.sh src/test.s --
-
-real	0m0.030s
-user	0m0.008s
-sys	0m0.015s
 === 2026-05-17T03:46:32Z label=phase2-typed-ast ===
 -- selfhosted_interpreter.sh sample.s (stdin=hi) --
 
@@ -302,4 +287,55 @@ sys	0m0.212s
 real	0m0.026s
 user	0m0.011s
 sys	0m0.013s
+
+=== 2026-05-27T06:17:07Z label=committed-pre-N5-replace ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m44.441s
+user	2m47.524s
+sys	0m2.668s
+-- interpreter.sh sample.s --
+
+real	0m0.836s
+user	0m1.011s
+sys	0m0.151s
+-- native_interpreter.sh sample.s --
+
+real	0m0.057s
+user	0m0.009s
+sys	0m0.017s
+
+=== 2026-05-27T06:18:59Z label=stage1-d1r-n5-arity-fix ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	1m45.058s
+user	2m51.121s
+sys	0m2.794s
+-- interpreter.sh sample.s --
+
+real	0m0.742s
+user	0m1.006s
+sys	0m0.140s
+-- native_interpreter.sh sample.s --
+
+real	0m0.033s
+user	0m0.007s
+sys	0m0.013s
+
+=== 2026-05-27T06:20:50Z label=stage2-d1r-n5-arity-fix ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi) --
+
+real	4m15.780s
+user	7m6.163s
+sys	0m5.434s
+-- interpreter.sh sample.s --
+
+real	0m1.126s
+user	0m1.854s
+sys	0m0.195s
+-- native_interpreter.sh sample.s --
+
+real	0m0.033s
+user	0m0.011s
+sys	0m0.016s
 
