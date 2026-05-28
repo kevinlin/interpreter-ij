@@ -339,3 +339,10 @@ real	0m0.033s
 user	0m0.011s
 sys	0m0.016s
 
+=== p2.6-d1r-run-N+6 stage2 selfhost (2026-05-28) ===
+-- selfhosted_interpreter.sh src/sample.s (stage2 = stage1->stage1->src/interpreter.s, Run N+6 closure-body hoist) --
+real 146.22s
+user 212.16s
+sys 4.16s
+note: vs prior Run N+5 stage2 4m15.8s → 1.74x recovery. Stage2 binary 6.25 MB (up from 5.70 MB; new staticImpl field on every FuncDecl Node). Committed bridge 1m44s unchanged. Stage1 ~1m45s (parity, IF-branch never fires there).
+

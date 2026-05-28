@@ -1761,6 +1761,15 @@ def functionDeclarationToGo(self) {
     // here to avoid doubling the emit size; nkFuncDecl still runs so the
     // ctx[name] = Value{tag:tFunc} binding exists for any indirect-by-value
     // callers (e.g. `let g = foo; g(42)`).
+    //
+    // Run N+6: when this decl is direct-emit'd (useDirectEmit==true), also
+    // attach staticImpl: ij_<name>_impl_wrapper to the FuncDecl Node so the
+    // evalFuncDecl runtime closure dispatches to the direct-Go-statement impl
+    // instead of walking the Node-tree body via eval(bodyN, local). This
+    // closes the dominant cost path under selfhost: indirect calls like
+    // node["evaluate"](node, ctx) (Execute -> evalFuncDecl closure -> eval).
+    // staticImpl on a FuncDecl Node = closure body shortcut (NOT a direct
+    // call site -- nkStaticCall already covers the direct-by-name path).
     print('&Node{kind: nkFuncDecl, name: "' + self["name"] + '", params: []string{');
 
     let params = self["parameters"];
@@ -1785,6 +1794,10 @@ def functionDeclarationToGo(self) {
                 body["toGo"](body);
             }
         }
+    }
+
+    if (self["useDirectEmit"] == true) {
+        print(", staticImpl: " + mangle(self["name"]) + "_impl_wrapper");
     }
 
     print('}');
@@ -5512,9 +5525,32 @@ puts("if n.right != nil { var ret bool; v, ret = eval(n.right, ctx); if ret { re
 puts("return v, true");
 puts("}");
 puts("func evalFuncDecl(n *Node, ctx *Context) (Value, bool) {");
+puts("defCtx := ctx");
+// Run N+6: if the FuncDecl was direct-emit'd, dispatch the closure body
+// straight into ij_<name>_impl_wrapper(defCtx, args.values). Skips the
+// per-call &Context literal + params-map alloc + eval(bodyN, local) tree
+// walk for every indirect call (the hot path under selfhost). For non-
+// direct-emit'd defs (~12 holdouts + user-level IJ defs in parsed input)
+// fall through to the original eval-body path.
+//
+// We pass defCtx (the ctx at evalFuncDecl-time = rootCtx for top-level
+// promoted defs) instead of callerCtx because FunctionCommand.Execute
+// discards callerCtx (Phase 2.5 alloc opt: `executeFunc(nil, params)`).
+// The direct-emit'd impl's `ctx := callerCtx; ctx.Get(\"<name>\")` walks
+// the parent chain to find top-level bindings; rootCtx is at the chain's
+// root, so handing the impl rootCtx directly preserves semantics AND
+// skips the chain-walk. ctx.Update for rkGlobalLet writes also resolve
+// at rootCtx (where the binding lives), so dual-write semantics hold.
+puts("if n.staticImpl != nil {");
+puts("impl := n.staticImpl");
+puts("fn := NewFunctionCommand(defCtx, func(callerCtx *Context, args *ArrayValue) Value {");
+puts("return impl(defCtx, args.values)");
+puts("})");
+puts("ctx.Create(n.name, vFunc(fn))");
+puts("return vFunc(fn), false");
+puts("}");
 puts("pNames := n.params");
 puts("bodyN := n.body");
-puts("defCtx := ctx");
 puts("npar := len(pNames)");
 // Closure body allocates a fresh *Context per call. Combine the Context
 // struct + the params map into ONE struct literal (single alloc + sized
