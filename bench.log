@@ -387,3 +387,41 @@ real	0m0.013s
 user	0m0.007s
 sys	0m0.008s
 
+=== 2026-05-29T07:33:04Z label=n7-stage2-headtohead fresh=1 repeat=3 binary=/tmp/ij-fresh ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=71.077s user=70.292s
+  run 2: real=71.580s user=71.257s
+  run 3: real=72.028s user=71.685s
+  real: min=71.08s median=71.58s max=72.03s
+  user: min=70.29s median=71.26s max=71.69s
+  headline (min real, GOMAXPROCS=1): 71.08s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.535s
+user	0m1.034s
+sys	0m0.095s
+-- native_interpreter.sh sample.s --
+
+real	0m0.013s
+user	0m0.007s
+sys	0m0.007s
+
+=== 2026-05-29T07:36:59Z label=committed-headtohead fresh=0 repeat=3 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=88.742s user=88.328s
+  run 2: real=89.465s user=89.014s
+  run 3: real=89.623s user=89.193s
+  real: min=88.74s median=89.47s max=89.62s
+  user: min=88.33s median=89.01s max=89.19s
+  headline (min real, GOMAXPROCS=1): 88.74s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.500s
+user	0m0.747s
+sys	0m0.081s
+-- native_interpreter.sh sample.s --
+
+real	0m0.011s
+user	0m0.005s
+sys	0m0.006s
+

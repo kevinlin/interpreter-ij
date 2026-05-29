@@ -85,7 +85,7 @@ Unchanged: IJ syntax/lexer/parser logic, driver scripts, MCP protocol, `test.s`,
 | P3 | String interning + null/bool/small-int singletons | 1.3–1.8× | Demoted: smaller lever than P2.5 |
 | P4 (stretch) | Slot-indexed contexts | 1.5–2× | Conditional — only if P1–P3 < 10× |
 
-Multiplicative range if all five land: ~12–87×. Realistic 10–15× cumulative vs phase0. **HEAD measurement is 0.88× of phase0 — the bookkeeping target for P2.5 is to crawl back to ≥1.3× of phase0 first, then continue.** Stop after first phase that crosses 10× cumulative.
+~~Multiplicative range if all five land: ~12–87×. Realistic 10–15× cumulative vs phase0.~~ **🔴 PROJECTION RETRACTED 2026-05-29 (Ralph instruction #14 — was inconsistent with reality).** After P1+P2+P2.5+P2.6 (Runs N..N+7) shipped and the committed bridge was replaced, the first honest same-session pinned head-to-head is **1.25× cumulative** (stage2 71.08s vs OLD bridge 88.74s; `GOMAXPROCS=1`, `--repeat 3`, band 1.01×). The "~12–87×" multiplicative model was wrong: it assumed independent multiplicative levers, but (a) the committed bridge was already a direct-Go-body build so D1-reborn only climbs back to ≈parity, and (b) per Amdahl the per-node `eval()` dispatch + ~33% GC are irreducible in a tree-walker. **Realistic incremental ceiling ≈ 2–4× (≈18–36s), well short of the ≤7s/10× goal.** Reaching 10× requires a structural lever (bytecode VM est. 5–8×; tagged-pointer `Value` ~1.3–1.5×; AST-cache ~1.2–1.5×). Full reassessment + decision gate: **`docs/specs/10x-feasibility-and-structural-levers.md`**.
 
 ---
 

@@ -73,14 +73,29 @@ if ! diff -q "$GOLDEN/mcp-native.out" "$tmp" >/dev/null; then bad "native MCP di
 else ok "native MCP matches golden"; fi
 rm -f "$tmp"
 
-# 5. Double self-transpile fixed point: interpreter.s -> Xa -> Xb, compare.
-note "5/5 double self-transpile fixed-point"
+# 5. TRUE self-transpile fixed point. Two layers of guarantee:
+#    (a) determinism  : interpreter.s -> Xa, interpreter.s -> Xb, Xa == Xb.
+#    (b) fixed point   : committed binary == Xa (the committed bridge, used to
+#        transpile interpreter.s, reproduces ITSELF byte-for-byte).
+#    Until 2026-05-29 this only checked (a). Determinism is necessary but NOT
+#    sufficient — the frozen pre-replace bridge was deterministic yet emitted an
+#    OLD shape no current source could reproduce (a one-way bridge). Now that the
+#    committed binary IS the true fixed point (stage2, replaced 2026-05-29), (b)
+#    is enforceable and catches a stale committed bridge immediately.
+note "5/5 true self-transpile fixed-point"
+case "$(uname -s)" in Linux) OS_NAME=linux ;; Darwin) OS_NAME=mac ;; *) OS_NAME=unknown ;; esac
+case "$(uname -m)" in x86_64) ARCH_NAME=amd64 ;; arm64|aarch64) ARCH_NAME=arm64 ;; *) ARCH_NAME=unknown ;; esac
+COMMITTED="$ROOT_DIR/interpreter_${OS_NAME}_${ARCH_NAME}"
 if "$ROOT_DIR/src/compile-local.sh" "$ROOT_DIR/src/interpreter.s" /tmp/ij-golden/_roundtrip_a >/tmp/rt1.log 2>&1 \
    && "$ROOT_DIR/src/compile-local.sh" "$ROOT_DIR/src/interpreter.s" /tmp/ij-golden/_roundtrip_b >/tmp/rt2.log 2>&1; then
-    if diff -q /tmp/ij-golden/_roundtrip_a /tmp/ij-golden/_roundtrip_b >/dev/null; then
-        ok "binaries are bit-identical"
+    if ! diff -q /tmp/ij-golden/_roundtrip_a /tmp/ij-golden/_roundtrip_b >/dev/null; then
+        bad "non-deterministic: transpile output differs $(wc -c </tmp/ij-golden/_roundtrip_a) vs $(wc -c </tmp/ij-golden/_roundtrip_b)"
+    elif [[ ! -x "$COMMITTED" ]]; then
+        bad "committed binary $COMMITTED missing — cannot check fixed point"
+    elif ! diff -q "$COMMITTED" /tmp/ij-golden/_roundtrip_a >/dev/null; then
+        bad "NOT a fixed point: committed binary != self-transpile output ($(wc -c <"$COMMITTED") vs $(wc -c </tmp/ij-golden/_roundtrip_a)) — committed bridge is stale, rebuild+replace it"
     else
-        bad "binaries differ across transpiles: $(wc -c </tmp/ij-golden/_roundtrip_a) vs $(wc -c </tmp/ij-golden/_roundtrip_b)"
+        ok "true fixed point: committed binary == self-transpile output (bit-identical)"
     fi
 else
     bad "compile-local.sh failed"
