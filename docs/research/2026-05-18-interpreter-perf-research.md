@@ -28,7 +28,7 @@ Two parts:
    - Performance bottlenecks.
    - Potential shortcuts that could improve interpreter performance.
 
-2. Cross-reference the previous performance work (`docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md`, `docs/superpowers/plans/2026-05-16-self-hosted-perf-10x.md`, `IMPLEMENTATION_PLAN.md`) against the current state of `src/interpreter.s` and note the paths that did not work.
+2. Cross-reference the previous performance work (`docs/specs/2026-05-16-self-hosted-perf-10x-design.md`, `docs/plans/2026-05-16-self-hosted-perf-10x.md`, `IMPLEMENTATION_PLAN.md`) against the current state of `src/interpreter.s` and note the paths that did not work.
 
 > **Documentation only.** This document describes the current state of the code as of `c42261c`. It does not propose changes, evaluate trade-offs, or recommend next steps. Where the existing planning documents already note a future direction, that future direction is cited as historical context, not as a recommendation.
 
@@ -616,11 +616,11 @@ The IJ-side AST is `*MapValue` with `"evaluate"` / `"toGo"` / `"toJson"` callabl
 
 ## Historical Context (from existing planning docs)
 
-### From `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md`
+### From `docs/specs/2026-05-16-self-hosted-perf-10x-design.md`
 
 The spec sets a 10× target for `selfhosted_interpreter.sh sample.s` (1m11s → 7s) via four phases: P1 tagged-union Value (2-4× expected), P2 typed AST struct nodes (2-4×), P3 string interning + singletons (1.3-1.8×), P4 slot-indexed contexts (1.5-2×). Multiplicative range: ~6-58×. Realistic 10-15×. Per-phase exit criterion: ≥1.5× over predecessor (Phase 1, 2), ≥1.2× (Phase 3), ≥1.3× (Phase 4). Drop-rule: <1.3× over predecessor ⇒ revert.
 
-### From `docs/superpowers/plans/2026-05-16-self-hosted-perf-10x.md`
+### From `docs/plans/2026-05-16-self-hosted-perf-10x.md`
 
 Detailed task breakdown. P1 shipped. P2 shipped structurally (Node AST landed) but missed every optimization it was supposed to enable (resolver projection, static-impl emit, slot allocation). P3 and P4 not started.
 
@@ -634,8 +634,8 @@ Current ground truth at HEAD `c42261c`. Verifies P0 complete; P1 dead-code clean
 
 This is the first research document under `docs/research/`. Related planning artefacts:
 
-- `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md` — spec (Phases 1-4 design).
-- `docs/superpowers/plans/2026-05-16-self-hosted-perf-10x.md` — task-by-task plan.
+- `docs/specs/2026-05-16-self-hosted-perf-10x-design.md` — spec (Phases 1-4 design).
+- `docs/plans/2026-05-16-self-hosted-perf-10x.md` — task-by-task plan.
 - `IMPLEMENTATION_PLAN.md` — current state, P0-P5 priorities, P1 forensics, honest follow-up risks.
 
 ---

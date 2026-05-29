@@ -2,7 +2,7 @@
 
 **Goal:** `./scripts/bench.sh` self-hosted (`selfhosted_interpreter.sh src/sample.s`, stdin=`hi`) ≤ 7s wall on macOS/arm64. Baseline `phase0 = 71.153s`. Need ≥10× cumulative.
 
-> Single source of truth for status, blockers, next-run roadmap. Design recipe lives under `docs/superpowers/`. Research/current-state map: `docs/research/2026-05-18-interpreter-perf-research.md`.
+> Single source of truth for status, blockers, next-run roadmap. Design recipe lives under `docs/specs/`. Research/current-state map: `docs/research/2026-05-18-interpreter-perf-research.md`.
 > **Verified:** 2026-05-29 (audit workflow against `src/interpreter.s` HEAD `1848c9c` + `bench.log`).
 
 ---
@@ -93,7 +93,7 @@ Spec: **`specs/bench-methodology.md`** (corrected this loop — see fixed-point 
 Spec: **`specs/10x-feasibility-and-structural-levers.md`** (authored this loop).
 
 - [ ] **Measure the real cumulative gain once the bridge is replaceable** (P-C). With `--fresh`, capture: new-emit-fully-landed selfhost vs `phase0=71.153s`. This is the first honest cumulative number in the whole effort.
-- [ ] **Update the design spec's projection.** `docs/superpowers/specs/...-design.md` claims "~12–87× / realistic 10–15×" multiplicative. That is inconsistent with the measured trajectory and Amdahl reality (§0-B). Revise to the realistic ~2–4× incremental ceiling + the structural-lever requirement. (Per Ralph instruction #14, this spec is inconsistent with reality and must be corrected.)
+- [ ] **Update the design spec's projection.** `docs/specs/...-design.md` claims "~12–87× / realistic 10–15×" multiplicative. That is inconsistent with the measured trajectory and Amdahl reality (§0-B). Revise to the realistic ~2–4× incremental ceiling + the structural-lever requirement. (Per Ralph instruction #14, this spec is inconsistent with reality and must be corrected.)
 - [ ] **Gate decision:** if fully-landed incremental new emit + P3 + P4 measures < ~3× over phase0 (i.e. > ~24s), the incremental path cannot reach ≤7s — **pivot to a structural lever** and author its spec. Candidates, in increasing effort: (1) cache parsed `interpreter.s` AST across the two selfhost reparses (~1.2–1.5×, smallest); (2) shrink `Value` to a tagged-pointer/NaN-box (~1.3–1.5×); (3) **bytecode VM** — transpile the IJ AST to bytecode and run a flat dispatch loop instead of recursive `eval()` over `*Node` (est. 5–8×; the only lever that plausibly reaches 10× alone). Prototype the bytecode arithmetic+call subset before committing.
 
 ### P-C — Run N+7 + committed-binary replace (the gating critical path, now measurable via P-A)

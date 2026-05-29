@@ -5,7 +5,7 @@ Status: Decision gate (authored during a plan-only loop; drives IMPLEMENTATION_P
 
 ## Purpose
 
-The original design (`docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md`) projected the five planned phases multiplying to "~12–87×, realistic 10–15×". After P1/P2/P2.5/P2.6 shipped and ~10 loops of D1-reborn, the **measured trajectory contradicts that projection**. This spec records the reassessment and the structural options, so the team makes an evidence-based decision instead of grinding an approach with a ceiling below the goal.
+The original design (`docs/specs/2026-05-16-self-hosted-perf-10x-design.md`) projected the five planned phases multiplying to "~12–87×, realistic 10–15×". After P1/P2/P2.5/P2.6 shipped and ~10 loops of D1-reborn, the **measured trajectory contradicts that projection**. This spec records the reassessment and the structural options, so the team makes an evidence-based decision instead of grinding an approach with a ceiling below the goal.
 
 ## The goal restated
 

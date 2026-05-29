@@ -1,4 +1,4 @@
-0a. Study `docs/superpowers/*` to learn the application specifications.
+0a. Study `docs/specs/*` to learn the application specifications.
 0b. Study @IMPLEMENTATION_PLAN.md.
 0c. For reference, the application source code is in `src/*`.
 
