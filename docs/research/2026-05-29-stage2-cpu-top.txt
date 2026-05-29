@@ -1,0 +1,30 @@
+File: ij-fresh
+Type: cpu
+Time: 2026-05-29 10:26:15 +08
+Duration: 126.71s, Total samples = 110.35s (87.09%)
+Showing nodes accounting for 23.31s, 21.12% of 110.35s total
+Dropped 336 nodes (cum <= 0.55s)
+Showing top 22 nodes out of 145
+      flat  flat%   sum%        cum   cum%
+     1.51s  1.37%  1.37%     92.50s 83.82%  main.(*FunctionCommand).Execute
+     0.73s  0.66%  2.03%     92.48s 83.81%  main.Value.Execute (inline)
+     0.73s  0.66%  2.69%     92.45s 83.78%  main.evalFuncDecl.func1
+     0.36s  0.33%  3.02%     87.62s 79.40%  main.ij_blockStatementEvaluate_impl
+     0.03s 0.027%  3.04%     87.14s 78.97%  main.ij_blockStatementEvaluate_impl_wrapper
+     2.32s  2.10%  5.15%     81.95s 74.26%  main.eval
+     0.66s   0.6%  5.75%     81.78s 74.11%  main.evalCall
+     0.29s  0.26%  6.01%     81.37s 73.74%  main.ij_CallExpression_evaluate_impl
+     0.47s  0.43%  6.43%     81.04s 73.44%  main.evalBlock
+     0.02s 0.018%  6.45%     80.65s 73.09%  main.ij_CallExpression_evaluate_impl_wrapper
+     0.15s  0.14%  6.59%     80.48s 72.93%  main.evalFuncDecl.func2
+     0.49s  0.44%  7.03%     77.93s 70.62%  main.evalVarDecl
+     0.09s 0.082%  7.11%     58.77s 53.26%  main.ij_ifStatementEvaluate_impl
+     0.09s 0.082%  7.20%     57.71s 52.30%  main.ij_ifStatementEvaluate_impl_wrapper
+     0.15s  0.14%  7.33%     49.57s 44.92%  main.ij_evaluateInfixExpression_impl
+     0.69s  0.63%  7.96%     49.53s 44.88%  main.ij_ctxGet_impl_wrapper
+     0.08s 0.072%  8.03%     49.42s 44.78%  main.ij_evaluateInfixExpression_impl_wrapper
+     2.91s  2.64% 10.67%     49.35s 44.72%  main.ij_ctxGet_impl
+     0.20s  0.18% 10.85%     49.35s 44.72%  main.ij_identifierEvaluate_impl
+     0.15s  0.14% 10.98%     49.33s 44.70%  main.ij_identifierEvaluate_impl_wrapper
+     0.02s 0.018% 11.00%     42.79s 38.78%  main.evalWhile
+    11.17s 10.12% 21.12%     37.19s 33.70%  main.ij_mapHasKey_impl

@@ -4,16 +4,15 @@ Succinct rules for how to BUILD the project:
 
 ```bash
 ./src/compile-local.sh src/interpreter.s /tmp/ij_stage1  # transpile + compile
-# Fresh self-builds emit a complete func main() and pass tests; D1-reborn N+5
-# (positional-arg calling convention) source landed (P2.6, 2026-05-27).
-# Stage1 (committed bridge → new src) is at PARITY (~1m45s selfhost sample.s).
-# BUT stage2 (true fixed-point built by stage1) still regresses ~2.4× on
-# selfhost (4m15s vs stage1 1m45s, 2026-05-27 measurement). Root cause:
-# MapValue["evaluate"] closure dispatch dominates — Run N+5 didn't help it.
-# Run N+6 (closure-body hoist or call-site specialisation) is the next lever.
-# DO NOT cp /tmp/ij_stage1 interpreter_mac_arm64 permanently until stage2
-# selfhost drops below ~2m; committed bridge stays as the canonical bridge.
-# If you accidentally overwrite, run `git restore interpreter_mac_arm64`.
+# Fresh self-builds emit a complete func main() and pass tests.
+# Stage2 selfhost trajectory (pinned GOMAXPROCS=1 min-of-3): N+6 214.42s ->
+# N+7 75.61s (ctxGet/mapHasKey hot-path reorder, 2.84x, 2026-05-29). Stage2 is
+# now BELOW the committed bridge -> the "drops below ~2m" precondition for
+# replacing the committed binary is MET. Bridge replacement is still a
+# DELIBERATE, separately-verified step (capture committed pinned min-of-3
+# head-to-head first); it was intentionally NOT done in the N+7 commit. Until
+# then the committed bridge stays canonical; if you accidentally overwrite it,
+# run `git restore interpreter_mac_arm64`.
 #
 # ARITY GOTCHA: positional-arg conv enforces Go arity. IJ source tolerates
 # caller-arity != callee-arity (extras dropped, missings vNull-pad).

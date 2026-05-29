@@ -344,7 +344,11 @@ sys	0m0.016s
 real 146.22s
 user 212.16s
 sys 4.16s
-note: vs prior Run N+5 stage2 4m15.8s → 1.74x recovery. Stage2 binary 6.25 MB (up from 5.70 MB; new staticImpl field on every FuncDecl Node). Committed bridge 1m44s unchanged. Stage1 ~1m45s (parity, IF-branch never fires there).
+
+note: vs prior Run N+5 stage2 4m15.8s → 1.74x recovery. 
+Stage2 binary 6.25 MB (up from 5.70 MB; new staticImpl field on every FuncDecl Node). 
+Committed bridge 1m44s unchanged. 
+Stage1 ~1m45s (parity, IF-branch never fires there).
 
 === 2026-05-29T01:48:58Z label=n6-fresh-fixedpoint fresh=1 repeat=2 binary=/tmp/ij-fresh ===
 -- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=2) --
@@ -363,4 +367,23 @@ sys	0m0.230s
 real	0m0.064s
 user	0m0.012s
 sys	0m0.019s
+
+=== 2026-05-29T03:16:30Z label=n7-maphaskey-reorder fresh=1 repeat=3 binary=/tmp/ij-fresh ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=76.680s user=75.262s
+  run 2: real=75.614s user=74.873s
+  run 3: real=75.627s user=74.910s
+  real: min=75.61s median=75.63s max=76.68s
+  user: min=74.87s median=74.91s max=75.26s
+  headline (min real, GOMAXPROCS=1): 75.61s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.568s
+user	0m1.106s
+sys	0m0.115s
+-- native_interpreter.sh sample.s --
+
+real	0m0.013s
+user	0m0.007s
+sys	0m0.008s
 

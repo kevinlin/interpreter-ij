@@ -3932,25 +3932,30 @@ def ctxDefine(ctx, name, value) {
 
 // Get variable or function from current or parent scopes, with errors on not found
 def ctxGet(ctx, name, position) {
-    // Direct lookup is faster than mapHasKey for the common case
+    // Hot path: a present, non-null binding. O(1), no scan.
     let val = ctx["values"][name];
     if (val != null) {
         return val;
     }
-    
-    // Check if key exists but value is null
-    if (mapHasKey(ctx["values"], name)) {
-        return null;
-    }
 
-    // Check functions map
+    // Functions are never registered as null, so a non-null read here is a hit.
+    // Checking this BEFORE the values present-null scan is the load-bearing
+    // reorder: looking up a builtin or top-level def used to fall through to
+    // mapHasKey(values) first, which keys()-allocates and linear-scans the
+    // entire (hundreds-deep) global values map on every such lookup. Under
+    // selfhost that made ij_mapHasKey_impl the hottest leaf (10% flat / 34% cum
+    // via ctxGet — see docs/research/2026-05-29-stage2-cpu.pprof). With the
+    // functions probe first, the common builtin/global-fn path never scans.
     val = ctx["functions"][name];
     if (val != null) {
         return val;
     }
-    
-    // Check if function exists but value is null
-    if (mapHasKey(ctx["functions"], name)) {
+
+    // Both maps read null. The only way that is not a genuine miss is an
+    // explicit null binding, and only the values map can hold one (functions
+    // are never null), so the scan is restricted to values and skipped entirely
+    // for the hot paths above.
+    if (mapHasKey(ctx["values"], name)) {
         return null;
     }
 
