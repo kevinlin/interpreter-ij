@@ -24,7 +24,11 @@ case "$ARCH" in
     *)       echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-BINARY="$PROJECT_ROOT/interpreter_${OS_NAME}_${ARCH_NAME}"
+# IJ_BINARY overrides the *bridge* binary used to transpile <source.s>.
+# Default is the committed binary. Overriding lets callers build a true
+# fixed point safely (committed -> stage1, then IJ_BINARY=stage1 -> stage2)
+# without ever overwriting/restoring the committed binary.
+BINARY="${IJ_BINARY:-$PROJECT_ROOT/interpreter_${OS_NAME}_${ARCH_NAME}}"
 if [[ ! -x "$BINARY" ]]; then
     echo "No suitable binary found for $OS_NAME on $ARCH_NAME." >&2
     exit 1

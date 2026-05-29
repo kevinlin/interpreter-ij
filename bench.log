@@ -346,3 +346,21 @@ user 212.16s
 sys 4.16s
 note: vs prior Run N+5 stage2 4m15.8s → 1.74x recovery. Stage2 binary 6.25 MB (up from 5.70 MB; new staticImpl field on every FuncDecl Node). Committed bridge 1m44s unchanged. Stage1 ~1m45s (parity, IF-branch never fires there).
 
+=== 2026-05-29T01:48:58Z label=n6-fresh-fixedpoint fresh=1 repeat=2 binary=/tmp/ij-fresh ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=2) --
+  run 1: real=228.076s user=193.329s
+  run 2: real=214.419s user=188.250s
+  real: min=214.42s median=221.25s max=228.08s
+  user: min=188.25s median=190.79s max=193.33s
+  headline (min real, GOMAXPROCS=1): 214.42s over 2 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.948s
+user	0m1.507s
+sys	0m0.230s
+-- native_interpreter.sh sample.s --
+
+real	0m0.064s
+user	0m0.012s
+sys	0m0.019s
+

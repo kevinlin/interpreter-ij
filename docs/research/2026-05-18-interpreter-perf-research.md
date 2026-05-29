@@ -632,7 +632,7 @@ Current ground truth at HEAD `c42261c`. Verifies P0 complete; P1 dead-code clean
 
 ## Related Research
 
-This is the first research document under `docs/superpowers/research/`. Related planning artefacts:
+This is the first research document under `docs/research/`. Related planning artefacts:
 
 - `docs/superpowers/specs/2026-05-16-self-hosted-perf-10x-design.md` — spec (Phases 1-4 design).
 - `docs/superpowers/plans/2026-05-16-self-hosted-perf-10x.md` — task-by-task plan.

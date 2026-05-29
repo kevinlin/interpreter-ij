@@ -17,3 +17,6 @@ src/update.sh
 
 # Cursor
 .history/
+
+# Local agent state
+.claude/

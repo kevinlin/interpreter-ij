@@ -13,7 +13,7 @@ After implementing Phase 1 (tagged-union `Value`) and Phase 2 (typed AST `Node`)
 | `phase2-typed-ast` (post P1+P2 cutover) | 1m25.086s | 0.83× | 4–16× cumulative |
 | `p2-no-refresh` (HEAD, post-cleanup) | 1m20.478s | 0.88× | — |
 
-**The 10× goal is unmet, and the phases as shipped REGRESSED vs phase0.** Root cause is documented in `docs/superpowers/research/2026-05-18-interpreter-perf-research.md` (the research doc is the authoritative current-state map; this section is the design-level summary).
+**The 10× goal is unmet, and the phases as shipped REGRESSED vs phase0.** Root cause is documented in `docs/research/2026-05-18-interpreter-perf-research.md` (the research doc is the authoritative current-state map; this section is the design-level summary).
 
 ### What actually shipped vs what was spec'd
 

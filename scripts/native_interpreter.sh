@@ -22,9 +22,13 @@ case "$ARCH" in
     *)       echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-# Construct binary name
+# Construct binary name.
+# IJ_BINARY override lets a caller (e.g. bench.sh --fresh) point the whole
+# nested self-host stack at an arbitrary build without touching the committed
+# binary. The env var propagates through interpreter.sh/selfhosted_interpreter.sh
+# for free, so no flag threading is needed.
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BINARY="$ROOT_DIR/interpreter_${OS_NAME}_${ARCH_NAME}"
+BINARY="${IJ_BINARY:-$ROOT_DIR/interpreter_${OS_NAME}_${ARCH_NAME}}"
 
 # Check if the binary exists
 if [[ ! -x "$BINARY" ]]; then
