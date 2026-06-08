@@ -4,7 +4,8 @@
 
 > Single source of truth for status, blockers, next-run roadmap. Design recipe lives under `docs/specs/`. Research/current-state map: `docs/research/2026-05-18-interpreter-perf-research.md`.
 > **Verified:** 2026-05-29 (audit workflow against `src/interpreter.s` HEAD `1848c9c` + `bench.log`).
-> **🟢 DEADLOCK BROKEN 2026-05-29 (this loop):** committed bridge **replaced** with the true fixed-point stage2 (`fa1fe55…`, was frozen `ac2e6f3`/`282e1126…`). First honest same-session pinned head-to-head: **committed-old 88.74s vs stage2 71.08s = 1.25× cumulative** for the entire source arc since `ac2e6f3` (P1+P2+P2.5+P2.6 N..N+7). The default `bench.sh` now measures current source — the gating deadlock that hid ~10 loops is gone. **P-B verdict is now evidence-based: 1.25× ≪ the 3× pivot threshold → the incremental tree-walker path cannot reach ≤7s; pivot to a structural lever (bytecode VM).** See §0 + P-B.
+> **🟢 DEADLOCK BROKEN 2026-05-29:** committed bridge **replaced** with the true fixed-point stage2 (`fa1fe55…`, was frozen `ac2e6f3`/`282e1126…`). First honest same-session pinned head-to-head: **committed-old 88.74s vs stage2 71.08s = 1.25× cumulative** for the entire source arc since `ac2e6f3` (P1+P2+P2.5+P2.6 N..N+7). The default `bench.sh` now measures current source — the gating deadlock that hid ~10 loops is gone. **P-B verdict: 1.25× ≪ the 3× pivot threshold → the incremental tree-walker path cannot reach ≤7s; pivot to a structural lever (bytecode VM).** See §0 + P-B.
+> **🟢 PIVOT DE-RISKED 2026-05-30 (this loop):** the bytecode-VM lever is **measured, not guessed**. A faithful tree-walker-vs-VM prototype (`experiments/bytecode-vm-prototype/`, same 88-byte `Value`) gives **vm 7.96× / vmLean 19.19×** on fib(32) with **per-call allocs 35.2M → ~0**. Lever 3 = GO. Implementation spec authored: **`docs/specs/bytecode-vm-implementation.md`**. Next loop starts P-VM.1 (Go-side VM behind `IJ_VM` flag). See §0-B + P-VM.
 
 ---
 
@@ -44,7 +45,17 @@ The committed bridge (~71–104s) is already a *direct-Go-bodies* build. Fully l
 | P4 slot-indexed contexts | ~1.3–1.6× | cuts `ctx.Get` chain walks; eval() dispatch + Value copy remain |
 | **Stacked plausible ceiling** | **~2–4× over phase0 (≈18–36s)** | per-node tree-walk eval() cost + ~33% GC are irreducible in a tree-walker |
 
-pprof (stage2, fib25): `eval`+`Execute`+`evalBlock`+`evalCall` ≈ 34% cum, `evalFuncDecl.func1` 33.6%, GC (kevent+gcBgMark) ≈ 33%. The planned phases attack **allocation rate**, not **operation count** or **per-node dispatch cost**. **≤7s (10×) realistically requires a structural lever the current plan treats as out-of-scope:** a bytecode VM (eliminates per-node `eval()` dispatch + Value copy; est. 5–8×), a smaller `Value` (tagged-pointer / NaN-box; ~1.3–1.5×), or caching the parsed `interpreter.s` AST across the two selfhost reparses (~1.2–1.5×). Spec: `specs/10x-feasibility-and-structural-levers.md`.
+pprof (stage2, fib25): `eval`+`Execute`+`evalBlock`+`evalCall` ≈ 34% cum, `evalFuncDecl.func1` 33.6%, GC (kevent+gcBgMark) ≈ 33%. The planned phases attack **allocation rate**, not **operation count** or **per-node dispatch cost**. **≤7s (10×) realistically requires a structural lever the current plan treats as out-of-scope:** a bytecode VM (eliminates per-node `eval()` dispatch + Value copy), a smaller `Value` (tagged-pointer / NaN-box; ~1.3–1.5×), or caching the parsed `interpreter.s` AST across the two selfhost reparses (~1.2–1.5×). Spec: `specs/10x-feasibility-and-structural-levers.md`.
+
+**🟢 The bytecode-VM lever is now MEASURED (2026-05-30).** `experiments/bytecode-vm-prototype/` benches a byte-for-byte-faithful clone of the emitted runtime (88-byte `Value`, `Context{parent,map}` chain lookups, `eval(*Node)(Value,bool)`, `FunctionCommand` closure, per-call `*Context`+map+`*ArrayValue`) against a slot-based bytecode VM with the **same** `Value`:
+
+| engine (same 88-byte Value) | fib(32) min wall | allocs/call | speedup |
+|---|---|---|---|
+| treeWalk (faithful emit clone) | 2.588 s | 35,245,806 | 1.00× |
+| **vm — Lever 3 only** | **0.325 s** | **~40** (one-time arena) | **7.96×** |
+| vmLean — Lever 3 + lean Value | 0.135 s | ~38 | 19.19× |
+
+→ Lever 3 lands at the **top of the 5–8× estimate** with no Value-shrink inflation, and removes **all** per-call heap traffic (the ~33% GC cost). It models the *lighter* Go-side tree-walk, so the selfhost-dominant IJ-side `MapValue` walk gain is **≥ 8×**. **GO.** Implementation spec: `docs/specs/bytecode-vm-implementation.md`.
 
 **This is NOT a reason to stop.** Nobody has measured a fresh fully-landed new emit (deadlock above). The honest path is **measurement-first, then an evidence-based decision gate** — do not pre-abandon the incremental path, but do not pretend 10× is one loop away.
 
@@ -60,7 +71,7 @@ pprof (stage2, fib25): `eval`+`Execute`+`evalBlock`+`evalCall` ≈ 34% cum, `eva
 
 **Trajectory of stage2 selfhost** (fresh self-build, the number that actually reflects source work): Run N+2 `4m32s` → N+3 `4m1s` → N+5 `4m15s` → **N+6 `2m26.2s`** (closure-body hoist, 1.74×) → **N+7 `75.61s` pinned** (`ctxGet`/`mapHasKey` hot-path reorder, **2.84×** over the N+6 pinned baseline `214.42s`). Single biggest lever in the whole arc — `mapHasKey`'s `keys()` array-alloc + linear scan was both the hottest leaf (10.12% flat) AND a top GC driver (GC ~33% of wall); removing it from the common lookup path cut scan + allocation together. Bench: `--fresh --repeat 3`, `GOMAXPROCS=1`, band 75.61/75.63/76.68s (1.01×). **2026-05-29 head-to-head (less-loaded box, same session for both):** stage2 `71.08s` vs OLD committed bridge `88.74s` = **1.25×**; bridge then **replaced** (`fa1fe55…`). 1.25× is the honest cumulative for the whole arc since `ac2e6f3` — confirms the incremental ceiling is near-exhausted (§0-B).
 
-Phase status: P0 ✅ • P1 ✅ (tagged-union shipped; cleanup dropped D1/D2/D3) • P2 ✅ (typed AST) • P2.5 ✅ (resolver wired, source-only) • P2.6 D2-reborn ✅ + D1-reborn Runs N..N+6 ✅ • P-C Run N+7 ✅ • **P-C bridge-replace ✅ (2026-05-29: committed binary IS the fixed point; 1.25× cumulative head-to-head)** • **P-A ✅ (harness + pinned bands; drop-rule now usable)** • **P-B ✅ gate resolved → PIVOT to structural lever** • P3 ⬜ • P4 ⬜.
+Phase status: P0 ✅ • P1 ✅ (tagged-union shipped; cleanup dropped D1/D2/D3) • P2 ✅ (typed AST) • P2.5 ✅ (resolver wired, source-only) • P2.6 D2-reborn ✅ + D1-reborn Runs N..N+6 ✅ • P-C Run N+7 ✅ • **P-C bridge-replace ✅ (2026-05-29: committed binary IS the fixed point; 1.25× cumulative head-to-head)** • **P-A ✅ (harness + pinned bands; drop-rule now usable)** • **P-B ✅ gate resolved → PIVOT to structural lever** • **P-VM.0 ✅ (2026-05-30: lever de-risked — vm 7.96×/vmLean 19.19× measured; spec authored)** • **P-VM.1 ⬜ NEXT (Go-side VM behind `IJ_VM` flag)** • ~~P3~~ deprioritised • ~~P4~~ **subsumed by P-VM** (resolver `resolvedSlot` feeds the VM's slot frames directly).
 
 ---
 
@@ -105,7 +116,20 @@ Spec: **`specs/10x-feasibility-and-structural-levers.md`** (authored this loop).
 
 - [x] **Measured the real cumulative gain** (this loop, bridge now replaceable+replaced via P-C): same-session pinned head-to-head **stage2 71.08s vs OLD committed bridge 88.74s = 1.25×** — the first honest cumulative number in the whole effort. (vs the unpinned single-run `phase0=71.153s`: not directly comparable across pinning regimes; the same-session pinned 1.25× is the trustworthy figure.)
 - [x] **Updated the design spec's projection** — `docs/specs/2026-05-16-self-hosted-perf-10x-design.md` had "~12–87× / realistic 10–15×". Corrected 2026-05-29 to the measured ~1.25× incremental result + the structural-lever requirement (Ralph instruction #14).
-- [x] **Gate decision: PIVOT.** 1.25× ≪ the 3× threshold (and below even the optimistic 2–4× estimate) ⇒ the incremental tree-walker path cannot reach ≤7s. **Next loop should prototype Lever 3 (bytecode VM)** on the `bench_eval.s` arithmetic+call subset before any further P3/P4 investment (P3/P4 add ~1.5× to a path already proven to cap ≈1.25–2×). Candidates, increasing effort: (1) cache parsed `interpreter.s` AST across the two selfhost reparses (~1.2–1.5×, smallest, benchmark-specific); (2) shrink `Value` to tagged-pointer/NaN-box (~1.3–1.5×); (3) **bytecode VM** — transpile the IJ AST to bytecode + flat dispatch loop instead of recursive `eval()` over `*Node` (est. 5–8×; the only lever that plausibly reaches 10× alone). **Author the chosen lever's implementation spec first.**
+- [x] **Gate decision: PIVOT.** 1.25× ≪ the 3× threshold (and below even the optimistic 2–4× estimate) ⇒ the incremental tree-walker path cannot reach ≤7s. Chosen lever: **(3) bytecode VM** — the only lever that plausibly reaches 10× alone. (Lever 1 AST-cache ~1.2–1.5× benchmark-specific; Lever 2 lean `Value` ~1.3–1.5× — kept as the optional P-VM.5 stacking step.)
+- [x] **De-risked the chosen lever** (2026-05-30, this loop): `experiments/bytecode-vm-prototype/` measures **vm 7.96× / vmLean 19.19×** on fib(32) vs a faithful emit clone, per-call allocs 35.2M → ~0. Confirms the 5–8× estimate (top of band) is real, not optimistic.
+- [x] **Authored the implementation spec first** (Ralph #12/#5): `docs/specs/bytecode-vm-implementation.md` (IR, opcodes, calling convention, fixed-point/MCP invariants, phased P-VM.1…5 landing).
+
+### P-VM — Bytecode VM (the structural lever; ✅ de-risked, ⬜ landing)
+
+Spec: **`docs/specs/bytecode-vm-implementation.md`**. Replaces recursive AST evaluation with compile-to-bytecode + a flat dispatch loop. Subsumes P4 (the VM's slot frames consume the resolver's `resolvedSlot` directly).
+
+- [x] **P-VM.0 — de-risk prototype + spec** (2026-05-30). 7.96× measured (lower bound; models the lighter Go-side walk). GO.
+- [ ] **P-VM.1 — Go-side VM behind an `IJ_VM=1` build flag.** Add `Chunk`/`Instr`/value-stack/frame-stack + `compileChunk(programNode)` to `goLibPrefix`; `func main()` picks `vmRun` vs `eval` on the env flag. Lower the arithmetic+call+if+return+block subset first. Differential-test `IJ_VM=1` vs default on `test.s`+`sample.s`. Bench `bench.sh --fresh phase-vm1`. **Keep the existing `*ToGo` Node emit** — runtime compile, smallest diff (spec §6.1).
+- [ ] **P-VM.2 — full node-kind coverage** (arrays/maps/index/prefix/while/var-decl/closures+upvalues/override pattern). `verify.sh` 5/5 with `IJ_VM=1`.
+- [ ] **P-VM.3 — flip default to VM + re-establish the true fixed point** (committed→s1→s2, `cmp s2 s3`; mirror the P-C bridge-replace procedure). The delicate step — never flip before 5/5 under the flag.
+- [ ] **P-VM.4 — mirror the VM into the IJ-side `evaluate` evaluator** (the selfhost-dominant `MapValue` walk); bench the real ≥8× selfhost win; then drop the dead tree-walker once `scripts/interpreter.sh`+`ast.sh`+resolver are migrated.
+- [ ] **P-VM.5 (optional) — stack Lever 2** (NaN-box/tagged-pointer `Value`) only if ≤7s still unmet; `vmLean` shows ~2.4× more headroom.
 
 ### P-C — Run N+7 + committed-binary replace (✅ critical path done; bridge replaced 2026-05-29)
 
@@ -120,13 +144,13 @@ Spec: **`specs/10x-feasibility-and-structural-levers.md`** (authored this loop).
 - [ ] **Close the 12 holdouts only if pprof says they matter** (they are parse-time AST factories, not selfhost-hot — likely skip). Closing needs nested-`FunctionDeclaration` support in `canDirectEmit`/`nodeToGoDirect`.
 - [x] **Replaced the committed binary** (2026-05-29). Gate confirmed OPEN by the same-session pinned head-to-head (stage2 71.08s vs OLD committed 88.74s = 1.25×). Procedure executed: built true fixed point (committed→stage1→stage2, `cmp stage2 stage3` byte-identical = `fa1fe55…`), functional-checked `/tmp/ij-fresh` against sample+test goldens, `cp /tmp/ij-fresh interpreter_mac_arm64`, **tightened verify.sh check 5 from determinism to true fixed point** (`committed == self-transpile output`, `scripts/verify.sh:76-99`), re-ran `verify.sh` 5/5. **🟠 Only `interpreter_mac_arm64` was replaced; `interpreter_linux_amd64` is still the OLD frozen bridge** (cross-compile needs Docker via `compile-linux.sh`; out of scope for this Docker-less loop) — rebuild it on a linux/Docker host next. Recover the OLD mac bridge if ever needed: `git show 062e95c:interpreter_mac_arm64`.
 
-### P3 — String interning + singletons (queued; only after P-C, and only if cumulative < 10×)
+### P3 — String interning + singletons (DEPRIORITISED — fold into P-VM, not standalone)
 
-Per design §Phase 3. Singletons (`vNull/vTrue/vFalse/vEmpty/smallInt[256]/strPool`) + `vIntFast` in `goLibPrefix`; route `eval` literal cases through them; IJ-side `strPoolIntern` (first-appearance order for determinism); `stringLiteralToGo` emits `sIdx`. Determinism gate + `bench.sh --fresh phase3-intern`. **Lever is small** (per-literal alloc only) — expect ~1.1–1.3×.
+Per design §Phase 3. Singletons (`vNull/vTrue/vFalse/vEmpty/smallInt[256]/strPool`) + `vIntFast`; the VM's `OpNull/OpTrue/OpFalse` opcodes (spec §3.2) are the natural home for the singleton routing. **Lever is small standalone** (~1.1–1.3×, per-literal alloc only) — not worth a separate loop; land the singletons as part of P-VM.1's constant pool.
 
-### P4 — Slot-indexed contexts (stretch; only if cumulative after P3 < 10×)
+### P4 — Slot-indexed contexts (✅ SUBSUMED by P-VM)
 
-Per design §Phase 4. Resolver assigns `nextSlot` per scope; project `resolvedSlot`+depth into Node (fields already exist, zero-valued); `Context.slots []Value` + `GetSlot/SetSlot`; `evalIdent/evalAssign/evalVarDecl` switch on `resolvedKind` to slot access; top-level globals stay map-based (override pattern + MCP). `bench.sh --fresh phase4-slots`.
+The VM's frame-local slots (spec §3.3) *are* slot-indexed contexts — they consume the resolver's `resolvedSlot` annotation (already on the `Node` struct, zero-valued) directly, with zero per-call map/`Context` alloc and no parent-chain walk. **Do not land P4 separately;** it is strictly weaker than and redundant with the VM frame design.
 
 ### P5 — Cleanup once 10× hit (or once a structural pivot supersedes the tree-walker)
 
@@ -179,7 +203,7 @@ Research doc `docs/research/2026-05-18-interpreter-perf-research.md` audited HEA
 ## 6. Open questions / risks
 
 - **🚫 DEAD-END — in-band null sentinel (do not retry).** Replacing `mapHasKey` by storing null bindings as a distinctive string sentinel (`"__IJ_NULL_SENTINEL_b7e3c1__"`) in `ctx["values"]` to make absent-vs-present-null an O(1) read **is fundamentally broken under self-hosting** and was reverted 2026-05-29. Empirically: in 2-layer (`interpreter.sh`) a program doing `let m={}; m["k"]=<sentinel>; m["k"]` reads back **null**, not the string (`type:null`, `is_null:true`). The outer interpreter layer's own `ctxGet`/value pipeline re-interprets any value equal to its sentinel as null, so the inner layer's sentinel is "re-sentinelised" and corrupted. **Any** in-band marker reachable through a name lookup hits this — confirmed with both the map-roundtrip and `let x=null` minimal repros. The only sentinel-free O(1) options are a native presence builtin (blocked by the frozen-committed-bridge bootstrap — checks 2/3 would see an undefined `hasKey`) or the call-ordering fix actually shipped (see P-C Run N+7-mapHasKey).
-- **10× IS infeasible via tree-walking** (§0-B) — CONFIRMED 2026-05-29: 1.25× honest cumulative. Design spec projection corrected. P-B gate says pivot to a structural lever.
+- **10× IS infeasible via tree-walking** (§0-B) — CONFIRMED 2026-05-29: 1.25× honest cumulative. Design spec projection corrected. P-B gate says pivot to a structural lever. **The structural lever (bytecode VM) is de-risked 2026-05-30: 7.96× measured (lower bound) — `experiments/bytecode-vm-prototype/` + `docs/specs/bytecode-vm-implementation.md`. 10× is reachable via P-VM.**
 - **Drop-rule vs noise** (§0-A): RESOLVED — pinned min-of-3 collapses the band to 1.01×, so the 1.3× drop-rule is enforceable.
 - **Committed binary** is **no longer a one-way bridge** — it IS the true fixed point (`fa1fe55…`) as of 2026-05-29, reproducible from source (`compile-local.sh` fixed point). A fresh recompile now equals the committed binary (verify.sh check 5 enforces it). Recover the OLD frozen bridge only if forensics need it: `git show 062e95c:interpreter_mac_arm64`. **`interpreter_linux_amd64` is still the OLD frozen bridge** — rebuild on a linux/Docker host.
 - **MCP override pattern** (`let oldX=X; def X`) is the verify.sh check-4 invariant. Any `functionDeclarationToGo`/`collectStaticDefs` edit re-runs verify.sh in full. `counts==1` gate preserves it.
