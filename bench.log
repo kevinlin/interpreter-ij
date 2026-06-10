@@ -425,3 +425,22 @@ real	0m0.011s
 user	0m0.005s
 sys	0m0.006s
 
+=== 2026-06-10T17:56:20Z label=phase-vm1 fresh=0 repeat=3 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=120.192s user=116.765s
+  run 2: real=120.353s user=117.114s
+  run 3: real=120.117s user=117.729s
+  real: min=120.12s median=120.19s max=120.35s
+  user: min=116.77s median=117.11s max=117.73s
+  headline (min real, GOMAXPROCS=1): 120.12s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.912s
+user	0m1.611s
+sys	0m0.214s
+-- native_interpreter.sh sample.s --
+
+real	0m0.028s
+user	0m0.011s
+sys	0m0.015s
+
