@@ -97,9 +97,14 @@ Instr { op uint8; a int32; b int32 }   // two operands cover slot+argc, jump tar
   pattern: `OpStoreGlobal` to the same index re-binds). Builtins in a native table.
 
 ### 3.4 Reuse existing scaffolding
-- **`resolvedSlot` + `resolvedKind` are already on the `Node` struct** (zero-valued,
-  scaffolded for P4 — `IMPLEMENTATION_PLAN.md` §3.1). The compiler pass reads the
-  resolver's slot assignment instead of P4 wiring it into a slot-`Context`. **P4 is
+- **`resolvedSlot` is dead scaffold — the resolver assigns NO slots** (verified
+  2026-06-10: sole occurrence is the emitted Go struct decl, `src/interpreter.s:5344`;
+  the resolver writes `resolvedKind`/`resolvedOrigin` only). **P-VM.1's `compileChunk`
+  must do its own name→slot numbering** via a per-chunk symbol table built at runtime
+  from params + function-scope `let`s (mirrors the existing `hasLocals` walk). This
+  keeps the diff out of the resolver/emitters entirely. Wiring slot assignment into
+  the IJ resolver + projecting `resolvedSlot` through the `*ToGo` emitters is the
+  bigger-diff alternative; reconsider only at P-VM.4 (IJ-side mirror). **P4 is
   subsumed by this lever** — do not land P4 separately.
 - **`analyzeIsStatic` / `resolvedIsStatic`** already classify pure top-level defs;
   reuse to choose `OpCallIJ` vs an inlined/native fast path.
@@ -110,7 +115,8 @@ Instr { op uint8; a int32; b int32 }   // two operands cover slot+argc, jump tar
 
 A new pass between resolve and emit (or at runtime startup — see §6.1). Per kind:
 - literals → `OpConst`/`OpNull`/`OpTrue`/`OpFalse` (consts interned).
-- ident → `OpLoadSlot resolvedSlot` (param/local) | `OpLoadGlobal` (top-level) |
+- ident → `OpLoadSlot <chunk-symtab slot>` (param/local; slots numbered by
+  `compileChunk` itself — see §3.4) | `OpLoadGlobal` (top-level) |
   `OpCallNative`-ref (lib). Falls back to a global lookup for unannotated nodes.
 - infix/prefix → operands then `OpInfix`/`OpPrefix` (short-circuit `&&`/`||` via jumps).
 - if/while → condition + `OpJumpIfFalse`/`OpJump` with **backpatching** (prototype shows

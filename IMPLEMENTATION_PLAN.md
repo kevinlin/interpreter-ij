@@ -3,7 +3,7 @@
 **Goal:** `./scripts/bench.sh` self-hosted (`selfhosted_interpreter.sh src/sample.s`, stdin=`hi`) ≤ 7s wall on macOS/arm64. Baseline `phase0 = 71.153s`. Need ≥10× cumulative.
 
 > Single source of truth for status, blockers, next-run roadmap. Design recipe lives under `docs/specs/`. Research/current-state map: `docs/research/2026-05-18-interpreter-perf-research.md`.
-> **Verified:** 2026-05-29 (audit workflow against `src/interpreter.s` HEAD `1848c9c` + `bench.log`).
+> **Verified:** 2026-06-10 (plan audit at HEAD `504ea62`, tree clean): P-VM.1 NOT started — zero `IJ_VM`/`compileChunk`/`vmRun` hits in `src/`; no bench entries since 2026-05-29; verify.sh check 5 still true-fixed-point (`scripts/verify.sh:76-99`). One spec correction: `resolvedSlot` is **not** assigned by the resolver (single occurrence = emitted struct decl `:5344`) — see P-VM.1 slot-assignment note below; `docs/specs/bytecode-vm-implementation.md` §3.4 corrected.
 > **🟢 DEADLOCK BROKEN 2026-05-29:** committed bridge **replaced** with the true fixed-point stage2 (`fa1fe55…`, was frozen `ac2e6f3`/`282e1126…`). First honest same-session pinned head-to-head: **committed-old 88.74s vs stage2 71.08s = 1.25× cumulative** for the entire source arc since `ac2e6f3` (P1+P2+P2.5+P2.6 N..N+7). The default `bench.sh` now measures current source — the gating deadlock that hid ~10 loops is gone. **P-B verdict: 1.25× ≪ the 3× pivot threshold → the incremental tree-walker path cannot reach ≤7s; pivot to a structural lever (bytecode VM).** See §0 + P-B.
 > **🟢 PIVOT DE-RISKED 2026-05-30 (this loop):** the bytecode-VM lever is **measured, not guessed**. A faithful tree-walker-vs-VM prototype (`experiments/bytecode-vm-prototype/`, same 88-byte `Value`) gives **vm 7.96× / vmLean 19.19×** on fib(32) with **per-call allocs 35.2M → ~0**. Lever 3 = GO. Implementation spec authored: **`docs/specs/bytecode-vm-implementation.md`**. Next loop starts P-VM.1 (Go-side VM behind `IJ_VM` flag). See §0-B + P-VM.
 
@@ -122,10 +122,11 @@ Spec: **`specs/10x-feasibility-and-structural-levers.md`** (authored this loop).
 
 ### P-VM — Bytecode VM (the structural lever; ✅ de-risked, ⬜ landing)
 
-Spec: **`docs/specs/bytecode-vm-implementation.md`**. Replaces recursive AST evaluation with compile-to-bytecode + a flat dispatch loop. Subsumes P4 (the VM's slot frames consume the resolver's `resolvedSlot` directly).
+Spec: **`docs/specs/bytecode-vm-implementation.md`**. Replaces recursive AST evaluation with compile-to-bytecode + a flat dispatch loop. Subsumes P4 (the VM's slot frames ARE slot-indexed contexts; `compileChunk` numbers slots itself — see P-VM.1 note).
 
 - [x] **P-VM.0 — de-risk prototype + spec** (2026-05-30). 7.96× measured (lower bound; models the lighter Go-side walk). GO.
-- [ ] **P-VM.1 — Go-side VM behind an `IJ_VM=1` build flag.** Add `Chunk`/`Instr`/value-stack/frame-stack + `compileChunk(programNode)` to `goLibPrefix`; `func main()` picks `vmRun` vs `eval` on the env flag. Lower the arithmetic+call+if+return+block subset first. Differential-test `IJ_VM=1` vs default on `test.s`+`sample.s`. Bench `bench.sh --fresh phase-vm1`. **Keep the existing `*ToGo` Node emit** — runtime compile, smallest diff (spec §6.1).
+- [ ] **P-VM.1 — Go-side VM behind an `IJ_VM=1` build flag.** Add `Chunk`/`Instr`/value-stack/frame-stack + `compileChunk(programNode)` to `goLibPrefix`; `func main()` picks `vmRun` vs `eval` on the env flag (env-gate pattern already proven in the emitted main: `IJ_CPUPROFILE` `:6562`, `IJ_COUNTERS` `:6594`). Lower the arithmetic+call+if+return+block subset first. Differential-test `IJ_VM=1` vs default on `test.s`+`sample.s`. Bench `bench.sh --fresh phase-vm1`. **Keep the existing `*ToGo` Node emit** — runtime compile, smallest diff (spec §6.1).
+  - 🔴 **Slot-assignment correction (verified 2026-06-10):** the resolver does NOT assign slot indices — `resolvedSlot` exists only as a zero-valued field in the emitted Go `Node` struct (`src/interpreter.s:5344`, sole occurrence); the resolver writes `resolvedKind`/`resolvedOrigin` only. **P-VM.1 must therefore do its own name→slot numbering inside `compileChunk`** (per-chunk symbol table built at runtime from params + function-scope `let`s — mirrors the `hasLocals` walk). This is the recommended route: zero resolver/emitter/fixed-point churn. Projecting `resolvedSlot` through the IJ resolver + `*ToGo` emitters is the bigger-diff alternative — only revisit for P-VM.4 (IJ-side mirror) where the IJ compiler pass may want resolver help. Spec §3.4 corrected to match.
 - [ ] **P-VM.2 — full node-kind coverage** (arrays/maps/index/prefix/while/var-decl/closures+upvalues/override pattern). `verify.sh` 5/5 with `IJ_VM=1`.
 - [ ] **P-VM.3 — flip default to VM + re-establish the true fixed point** (committed→s1→s2, `cmp s2 s3`; mirror the P-C bridge-replace procedure). The delicate step — never flip before 5/5 under the flag.
 - [ ] **P-VM.4 — mirror the VM into the IJ-side `evaluate` evaluator** (the selfhost-dominant `MapValue` walk); bench the real ≥8× selfhost win; then drop the dead tree-walker once `scripts/interpreter.sh`+`ast.sh`+resolver are migrated.
@@ -150,7 +151,7 @@ Per design §Phase 3. Singletons (`vNull/vTrue/vFalse/vEmpty/smallInt[256]/strPo
 
 ### P4 — Slot-indexed contexts (✅ SUBSUMED by P-VM)
 
-The VM's frame-local slots (spec §3.3) *are* slot-indexed contexts — they consume the resolver's `resolvedSlot` annotation (already on the `Node` struct, zero-valued) directly, with zero per-call map/`Context` alloc and no parent-chain walk. **Do not land P4 separately;** it is strictly weaker than and redundant with the VM frame design.
+The VM's frame-local slots (spec §3.3) *are* slot-indexed contexts — slot numbering happens inside `compileChunk` (per-chunk symbol table; the resolver's `resolvedSlot` field is dead scaffold, never assigned — verified 2026-06-10), with zero per-call map/`Context` alloc and no parent-chain walk. **Do not land P4 separately;** it is strictly weaker than and redundant with the VM frame design.
 
 ### P5 — Cleanup once 10× hit (or once a structural pivot supersedes the tree-walker)
 
@@ -190,7 +191,7 @@ Research doc `docs/research/2026-05-18-interpreter-perf-research.md` audited HEA
 | §3.2 | All resolver annotations dead | ✅ P2.5 (`resolvedKind` now read by `evalIdent`) — **research doc now stale here** |
 | §3.10 | `FunctionCommand.Execute` wastes a Context alloc | ✅ P2.5 (`executeFunc(nil,…)`) |
 | §2.8 | String literals emit per occurrence | ⬜ P3 |
-| §3.1 | Six dead Node fields | 🔄 partially live post-P2.5 (`resolvedKind` live; `sIdx`→P3, `resolvedSlot`→P4, `isStatic`/`pos` still dead) → P5 |
+| §3.1 | Six dead Node fields | 🔄 partially live post-P2.5 (`resolvedKind` live; `sIdx`→P3, `resolvedSlot` confirmed dead 2026-06-10 — VM numbers own slots, drop field at P5, `isStatic`/`pos` still dead) → P5 |
 | §3.3 | `analyzeIsStatic` walks bodies | ✅ activated (D1-reborn `useDirectEmit` predicate) |
 | §3.4/§3.6/§3.7 | `useNodeTree`/`ijCount*`/`opCodeFor("!")` dead | ⬜ P5 |
 | §3.9 | Phase-3 singleton scaffolding present, not emitted | ⬜ P3 |
