@@ -1,4 +1,4 @@
-0a. Study `docs/specs/*` to learn the application specifications.
+0a. Study `docs/research/*` and `docs/specs/*` to learn the research and specifications of the application.
 0b. Study @IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
 0c. Study `scripts/*` to understand shared utilities & components.
 0d. For reference, the application source code is in `src/*`.
