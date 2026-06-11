@@ -9,7 +9,7 @@
 **Tech Stack:** IJ (self-hosted), Go (transpile target), bash drivers, golden-output regression harness.
 
 **Design source:** [docs/specs/2026-05-16-self-hosted-perf-10x-design.md](../specs/2026-05-16-self-hosted-perf-10x-design.md)
-**Research source (current state map):** [docs/research/2026-05-18-interpreter-perf-research.md](../../research/2026-05-18-interpreter-perf-research.md)
+**Research source (current state map):** [docs/research/2026-06-11-perf-benchmark-bottlenecks-and-optimization-ledger.md](../research/2026-06-11-perf-benchmark-bottlenecks-and-optimization-ledger.md) (supersedes the archived [2026-05-18 research](../research/archive/2026-05-18-interpreter-perf-research.md))
 
 ---
 

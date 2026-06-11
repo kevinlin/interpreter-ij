@@ -1,3 +1,9 @@
+> **⚠️ ARCHIVED 2026-06-11 — SUPERSEDED.** The D1-reborn port this template served
+> completed with Runs N..N+6; the patterns now live in the `*ToGoDirect` emitters in
+> `src/interpreter.s`, and the OLD bridge it documented was replaced 2026-05-29.
+> The source-of-truth perf research is now
+> `docs/research/2026-06-11-perf-benchmark-bottlenecks-and-optimization-ledger.md`.
+
 # D1-reborn Emit Template Reference
 
 Captured 2026-05-18 from `/tmp/d1r_app_raw.go` — the pre-`fix_app_go.py` `app.go` produced by `compile-local.sh src/interpreter.s`. The 188 `func ij_<name>_impl(...)` definitions at lines 4153–11541 were emitted by the **committed bridge's** OLD D1/D2 path. This file is the structural reference for porting per-statement direct emitters into the new `interpreter.s` (`*ToGoDirect`).

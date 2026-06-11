@@ -2,7 +2,7 @@
 
 **Goal:** `./scripts/bench.sh` self-hosted (`selfhosted_interpreter.sh src/sample.s`, stdin=`hi`) ≤ 7s wall on macOS/arm64. Baseline `phase0 = 71.153s`. Need ≥10× cumulative.
 
-> Single source of truth for status, blockers, next-run roadmap. Design recipe lives under `docs/specs/`. Research/current-state map: `docs/research/2026-05-18-interpreter-perf-research.md`.
+> Single source of truth for status, blockers, next-run roadmap. Design recipe lives under `docs/specs/`. Research/current-state map: `docs/research/2026-06-11-perf-benchmark-bottlenecks-and-optimization-ledger.md` (supersedes the archived 2026-05-18 research docs).
 > **🟢 P-VM.1 SHIPPED 2026-06-11 (this loop):** Go-side bytecode VM landed behind `IJ_VM=1`, default path untouched. `goVMPrefix()` (new def after `goLibPrefix` in `src/interpreter.s`) emits ~26 opcodes + `vmCompileProgram`/`vmCompileFunc`/`vmExec`/`vmCallChunk` as constant prelude text; `main()` env-gates `vmRunProgram(programNode, ctx)` vs `eval(...)`. Differential-tested at all 3 nesting layers + 3 dedicated VM test programs; fixed point re-established and committed binary replaced (verify.sh 5/5). See P-VM.1 section for the load-bearing semantics learnings (poison values, unbound params, stage1-vs-stage2 testing gotcha).
 > **🟢 DEADLOCK BROKEN 2026-05-29:** committed bridge **replaced** with the true fixed-point stage2 (`fa1fe55…`, was frozen `ac2e6f3`/`282e1126…`). First honest same-session pinned head-to-head: **committed-old 88.74s vs stage2 71.08s = 1.25× cumulative** for the entire source arc since `ac2e6f3` (P1+P2+P2.5+P2.6 N..N+7). The default `bench.sh` now measures current source — the gating deadlock that hid ~10 loops is gone. **P-B verdict: 1.25× ≪ the 3× pivot threshold → the incremental tree-walker path cannot reach ≤7s; pivot to a structural lever (bytecode VM).** See §0 + P-B.
 > **🟢 PIVOT DE-RISKED 2026-05-30 (this loop):** the bytecode-VM lever is **measured, not guessed**. A faithful tree-walker-vs-VM prototype (`experiments/bytecode-vm-prototype/`, same 88-byte `Value`) gives **vm 7.96× / vmLean 19.19×** on fib(32) with **per-call allocs 35.2M → ~0**. Lever 3 = GO. Implementation spec authored: **`docs/specs/bytecode-vm-implementation.md`**. Next loop starts P-VM.1 (Go-side VM behind `IJ_VM` flag). See §0-B + P-VM.
@@ -199,7 +199,7 @@ The VM's frame-local slots (spec §3.3) *are* slot-indexed contexts — slot num
 
 ## 5. Research-doc backlog (status as of 2026-05-29)
 
-Research doc `docs/research/2026-05-18-interpreter-perf-research.md` audited HEAD `c42261c`; several findings are now resolved by P2.5/P2.6.
+Research doc `docs/research/archive/2026-05-18-interpreter-perf-research.md` (archived; superseded by `docs/research/2026-06-11-perf-benchmark-bottlenecks-and-optimization-ledger.md`) audited HEAD `c42261c`; several findings are now resolved by P2.5/P2.6.
 
 | Research § | Finding | Status |
 |---|---|---|

@@ -1,3 +1,9 @@
+> **⚠️ ARCHIVED 2026-06-11 — SUPERSEDED.** This document audited commit `c42261c`;
+> its line numbers are stale and many "dead infrastructure" findings have since been
+> resolved (P2.5 resolver wiring, P2.6 D1/D2-reborn, Run N+7, P-VM.1). The
+> source-of-truth perf research is now
+> `docs/research/2026-06-11-perf-benchmark-bottlenecks-and-optimization-ledger.md`.
+
 ---
 date: 2026-05-18T00:40:00+0800
 researcher: Claude
