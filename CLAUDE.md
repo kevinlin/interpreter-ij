@@ -121,6 +121,7 @@ Run `./scripts/verify.sh --capture` once on a clean baseline before working on a
 - Top-level `let oldX = X; def X(...) { oldX(...) }` is the IJ idiom for overriding a builtin or earlier `def`. The transpiler is aware of it (see `lastDefIndex`); MCP relies on it. Any codegen change must preserve it.
 - AST nodes are `MapValue`s with `evaluate`/`toJson`/`toGo` callable entries — IJ has no closures-over-self other than via `self` being passed as the first arg.
 - For scripts that don't call `gets()`, prefix invocations with `echo |` so stdin is closed and the script doesn't block.
+- Index assignment is single-level only: `name[idx] = v` parses, but `m["a"]["b"] = v` is a parse error ("No prefix parse function for ASSIGN"). Use a reference temp: `let inner = m["a"]; inner["b"] = v;` (maps/arrays are references, so this mutates in place). Chained index *reads* (`m["a"]["b"]`) are fine.
 
 ## Current branch state
 

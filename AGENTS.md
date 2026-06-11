@@ -41,7 +41,7 @@ Succinct rules for how to BUILD the project:
 Run these after implementing to get immediate feedback:
 
 - Tests: `bash scripts/test.sh` (~3s)
-- VM differential (IJ_VM=1 must equal default; ~8s): `bash scripts/vm_difftest.sh`
+- VM differential (IJ_VM=1 must equal default; ~10s): `bash scripts/vm_difftest.sh` (honours `IJ_BINARY=<stage2>` — use it to test VM changes BEFORE replacing the committed binary; stage1 is parity-blind)
 - Verify (5 checks): `bash scripts/verify.sh` (~9–10 min — checks 1–4 fast, check 5 is two `compile-local.sh` runs)
 - Bench (committed binary, quick single-run smoke; unreliable for decisions): `bash scripts/bench.sh <label>`. The committed binary is now current source, so this is meaningful again — but still single-run; use `--repeat 3` for decisions.
 - Bench source work (builds fixed-point stage2, min/median/max under GOMAXPROCS=1): `bash scripts/bench.sh --fresh --repeat 3 <label>` (~2 fast builds + N×~75s selfhost). Pinned min-of-3 noise band is ~1.01×, so the 1.3× drop-rule is enforceable.

@@ -7,11 +7,13 @@
 #   ./bench.sh --repeat N [label]       # run selfhost block N times, report min/median/max
 #   ./bench.sh --fresh --repeat 3 label # combine
 #
-# WHY: the committed binary is frozen (ac2e6f3); without --fresh the bench
-# measures it, not your source changes (the gating-deadlock described in
-# IMPLEMENTATION_PLAN.md P-A / specs/bench-methodology.md). Single-run wall time
-# also has a ~1.55x noise band > the 1.3x drop-rule, so use --repeat for any
-# perf decision; min-of-N under GOMAXPROCS=1 is the headline (noise is one-sided).
+# WHY --fresh: the committed binary IS the true fixed point of the current
+# source since 2026-05-29 (verify.sh check 5 enforces it), so the default bench
+# is meaningful — but only AFTER the committed binary has been replaced for the
+# change under test. Use --fresh to bench uncommitted source work. Single-run
+# wall time has a ~1.55x noise band > the 1.3x drop-rule, so use --repeat for
+# any perf decision; min-of-N under GOMAXPROCS=1 is the headline (noise is
+# one-sided).
 #
 # Appends timings to bench.log.
 
