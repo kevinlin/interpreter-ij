@@ -5664,8 +5664,9 @@ puts("");
 
 }
 
-// P-VM.1: Go-side bytecode VM, selected at runtime with env IJ_VM=1 (default
-// path stays the tree-walking eval). Emitted as constant text into every
+// P-VM.1/3: Go-side bytecode VM. Since P-VM.3 (2026-06-12) it is the DEFAULT
+// engine; IJ_VM=0 opts back into the tree-walking eval (escape hatch until
+// P-VM.4 retires the dead walker). Emitted as constant text into every
 // app.go prelude, so the fixed point is unaffected by construction. The
 // compiler (vmCompileProgram/vmCompileFunc) runs at binary startup on the
 // emitted programNode:
@@ -5699,7 +5700,7 @@ puts("");
 // Arity tolerance (extras dropped, missing vNull-padded) lives in
 // vmCallChunk, matching the closure convention in evalFuncDecl.
 def goVMPrefix() {
-puts("// --- P-VM.1: bytecode VM (runtime compile; select with env IJ_VM=1) ---");
+puts("// --- P-VM: bytecode VM (runtime compile; default engine since P-VM.3, IJ_VM=0 opts out) ---");
 puts("const (");
 puts("vmOpConst uint8 = iota");
 puts("vmOpNull");
@@ -7386,13 +7387,14 @@ def programToGoPhase2(self) {
 
     print("}}");
     puts("");
-    // P-VM.1: opt-in bytecode VM. Same env-gate pattern as IJ_CPUPROFILE /
-    // IJ_COUNTERS above. Default stays the tree-walking eval; IJ_VM=1 runs
-    // the program chunk through vmCompileProgram + vmExec (see goVMPrefix).
-    puts("if os.Getenv(" + chr(34) + "IJ_VM" + chr(34) + ") != " + chr(34) + chr(34) + " {");
-    puts("vmRunProgram(programNode, ctx)");
-    puts("} else {");
+    // P-VM.3 (2026-06-12): the bytecode VM is the DEFAULT engine. IJ_VM=0
+    // opts back into the tree-walking eval (kept as an escape hatch until
+    // P-VM.4 retires the dead walker). Same env-gate pattern as
+    // IJ_CPUPROFILE / IJ_COUNTERS above; see goVMPrefix for the VM itself.
+    puts("if os.Getenv(" + chr(34) + "IJ_VM" + chr(34) + ") == " + chr(34) + "0" + chr(34) + " {");
     puts("eval(programNode, ctx)");
+    puts("} else {");
+    puts("vmRunProgram(programNode, ctx)");
     puts("}");
     puts("}");
 }

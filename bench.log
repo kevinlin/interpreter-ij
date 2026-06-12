@@ -482,3 +482,41 @@ real	0m0.050s
 user	0m0.011s
 sys	0m0.017s
 
+=== 2026-06-12T03:41:17Z label=phase-vm3 fresh=0 repeat=3 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=150.796s user=124.931s
+  run 2: real=151.058s user=127.013s
+  run 3: real=143.327s user=124.666s
+  real: min=143.33s median=150.80s max=151.06s
+  user: min=124.67s median=124.93s max=127.01s
+  headline (min real, GOMAXPROCS=1): 143.33s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.957s
+user	0m1.614s
+sys	0m0.238s
+-- native_interpreter.sh sample.s --
+
+real	0m0.037s
+user	0m0.012s
+sys	0m0.018s
+
+=== 2026-06-12T03:48:43Z label=phase-vm3-control-preflip fresh=0 repeat=3 binary=/tmp/fix_s2 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=135.169s user=122.414s
+  run 2: real=130.335s user=120.936s
+  run 3: real=148.300s user=126.319s
+  real: min=130.34s median=135.17s max=148.30s
+  user: min=120.94s median=122.41s max=126.32s
+  headline (min real, GOMAXPROCS=1): 130.34s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m1.081s
+user	0m1.566s
+sys	0m0.229s
+-- native_interpreter.sh sample.s --
+
+real	0m0.093s
+user	0m0.013s
+sys	0m0.021s
+
