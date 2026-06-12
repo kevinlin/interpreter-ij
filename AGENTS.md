@@ -6,14 +6,14 @@ Succinct rules for how to BUILD the project:
 ./src/compile-local.sh src/interpreter.s /tmp/ij_stage1  # transpile + compile
 # Fresh self-builds emit a complete func main() and pass tests.
 # COMMITTED BRIDGE (interpreter_mac_arm64) IS the true fixed point (since
-# 2026-05-29; 70d51330... after the P-VM.3 flip). A fresh compile-local
+# 2026-05-29; d17ae10f... after P-VM.4). A fresh compile-local
 # byte-equals the committed binary (verify.sh check 5 enforces it). Recover the
 # old one-way bridge only for forensics: git show 062e95c:interpreter_mac_arm64.
 # interpreter_linux_amd64 is STILL the old frozen bridge -> rebuild on a
-# linux/Docker host. mcp_mac_arm64 rebuilt from current source 2026-06-12
-# (was frozen at 2026-05-16). Default `bench.sh` measures current source.
-# Honest cumulative since ac2e6f3: 1.25x (pinned head-to-head). 10x needs a
-# structural lever (bytecode VM) -> see IMPLEMENTATION_PLAN P-B.
+# linux/Docker host. mcp_mac_arm64 rebuilt with P-VM.4 (e9b81ea5...).
+# Default `bench.sh` measures current source.
+# P-VM.4 (2026-06-12): selfhost 123.99s -> 34.94s = 3.55x same-session pinned.
+# Remaining to <=7s goal: 5x -> P-VM.5 (lean Value ~2.4x + close chunk bails).
 #
 # ARITY GOTCHA: positional-arg conv enforces Go arity. IJ source tolerates
 # caller-arity != callee-arity (extras dropped; missing params are UNBOUND --
@@ -21,9 +21,13 @@ Succinct rules for how to BUILD the project:
 # CallExpression_toGoDirect falls back to _impl_wrapper([]Value{...}) when
 # they mismatch. If you add a new direct-emit code path, preserve this.
 #
-# The bytecode VM is the DEFAULT engine since P-VM.3 (2026-06-12). IJ_VM=0
-# opts back into the tree-walk eval (escape hatch until P-VM.4). IJ_VM_DEBUG=1
-# prints VM compile stats to stderr (works on the default path).
+# TWO bytecode VMs, both default-on: the Go-side VM (P-VM.3) runs the native
+# layer's top-level program; the IJ-side VM (P-VM.4, `ijvm*` defs) runs every
+# INTERPRETED layer's program + function chunks. IJ_VM=0 disables both at all
+# nesting depths (getenv builtin chains down); IJ_VM_IJ=0 disables only the
+# IJ-side VM. IJ_VM_DEBUG=1 prints [vm] (Go-side) + [ijvm] (IJ-side, one line
+# per interpreted layer) compile stats to stderr. eputs = stderr puts builtin.
+# Tree-walker still load-bearing: escape hatches + 12 ijvm chunk bails.
 # Go toolchain: go1.26.4 EXACTLY (embedded in the binary -- any other version
 # breaks check 5 byte-identity). If `go` vanishes from PATH: ~/sdk/go1.26.4/bin.
 # STAGE GOTCHA: a committed-bridge build (stage1) carries new EMITTERS as data
@@ -48,7 +52,7 @@ Run these after implementing to get immediate feedback:
 - VM differential (default VM must equal IJ_VM=0 eval; ~25s incl. a fresh MCP build): `bash scripts/vm_difftest.sh` (honours `IJ_BINARY=<stage2>` — use it to test VM changes BEFORE replacing the committed binary; stage1 is parity-blind)
 - Verify (5 checks): `bash scripts/verify.sh` (~9–10 min — checks 1–4 fast, check 5 is two `compile-local.sh` runs)
 - Bench (committed binary, quick single-run smoke; unreliable for decisions): `bash scripts/bench.sh <label>`. The committed binary is now current source, so this is meaningful again — but still single-run; use `--repeat 3` for decisions.
-- Bench source work (builds fixed-point stage2, min/median/max under GOMAXPROCS=1): `bash scripts/bench.sh --fresh --repeat 3 <label>` (~2 fast builds + N×~75s selfhost). Pinned min-of-3 noise band is ~1.01×, so the 1.3× drop-rule is enforceable.
+- Bench source work (builds fixed-point stage2, min/median/max under GOMAXPROCS=1): `bash scripts/bench.sh --fresh --repeat 3 <label>` (~2 fast builds + N×~35s selfhost since P-VM.4). Pinned min-of-3 noise band is ~1.01×, so the 1.3× drop-rule is enforceable.
 - Re-capture goldens: `bash scripts/verify.sh --capture`
 
 Note: `verify.sh` check 5 now enforces the TRUE fixed point (committed binary == self-transpile output), tightened 2026-05-29 from the old determinism-only check.

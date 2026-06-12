@@ -1164,6 +1164,17 @@ def makeFunctionDeclaration(name, parameters, body, position) {
 def evaluateFunctionDeclaration(node, context) { // FIXME really?
     // Create the function definition as a map
     def functionValue(args) {
+        // P-VM.4: if the IJ-side bytecode compiler attached a chunk to this
+        // node (ijvmAttachChunks; only when the IJ VM gate is on), run the
+        // body as bytecode on a slot frame instead of tree-walking it. The
+        // function VALUE stays this ordinary closure either way, so values
+        // flow safely between VM-compiled and tree-walked code. defCtx =
+        // the captured declaration context -- non-slot names chain into it
+        // exactly like the tree-walk's functionContext parent chain.
+        let ijvmCh = node["ijvmChunk"];
+        if (ijvmCh != null) {
+            return ijvmCallChunk(ijvmCh, context, args);
+        }
         // Create a new context extended from the parent
         let functionContext = extendContext(context);
 
@@ -1337,7 +1348,7 @@ def libraryFunctionNames() {
         "char", "len", "chr", "ord", "substr", "int", "string", "random",
         "typeof", "isArray", "isMap", "isNumber", "isString", "double",
         "echo", "print", "delete", "startsWith", "endsWith", "trim",
-        "match", "findAll", "replace", "split"
+        "match", "findAll", "replace", "split", "getenv", "eputs"
     ];
 }
 
@@ -4835,6 +4846,21 @@ puts("values[i] = Value{tag: tString, s: part}");
 puts("}");
 puts("return vArray(NewArrayValue(values...))");
 puts("})))");
+// P-VM.4: getenv lets IJ-level code read env vars (the IJ-side VM gate).
+// Each interpreted layer re-registers getenv as a wrapper over the layer
+// above (DefaultLibraryFunctionsInitializer), so the value chains down to
+// this native os.Getenv at any nesting depth.
+puts("ctx.Create(" + chr(34) + "getenv" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
+puts("v := params.Get(Value{tag: tInt, i: 0})");
+puts("return Value{tag: tString, s: os.Getenv(v.ValueString())}");
+puts("})))");
+// P-VM.4: eputs writes to stderr (debug/diagnostics that must not corrupt
+// program stdout -- differential tests diff stdout). Chains like getenv.
+puts("ctx.Create(" + chr(34) + "eputs" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
+puts("val := params.Get(Value{tag: tInt, i: 0})");
+puts("fmt.Fprintln(os.Stderr, val.String())");
+puts("return Value{tag: tInt, i: 0}");
+puts("})))");
 puts("}");
 puts("// --- Value tagged-union (Phase 1) ---");
 puts("const (");
@@ -7409,6 +7435,821 @@ def mapToJsonString(obj) { // FIXME
     return ijToJson(obj);
 }
 
+// ============================================================================
+// P-VM.4: IJ-side bytecode VM -- the interpreted-layer mirror of the Go-side
+// VM in goVMPrefix. Replaces the node["evaluate"] MapValue tree-walk (the
+// selfhost-dominant cost) with compile-to-flat-arrays + a dispatch loop.
+//
+// Semantics target: the IJ tree-walk evaluator in THIS file (NOT the Go-side
+// runtime -- they differ!). Mirrored exactly:
+//   - && and || evaluate BOTH operands (no short-circuit at the IJ level).
+//   - missing call args bind the params to null; extra args are dropped.
+//   - every block is a fresh scope (modeled as compile-time shadow slots).
+//   - statement value = last statement's value (implicit function return).
+//   - errors reuse the same helpers (throwRuntimeError / raiseRuntimeError /
+//     ctxGet) so abort/continue behavior matches under both the native
+//     assert (panics) and the MCP overlay assert (collects + continues).
+// Known accepted divergences (pathological abort paths only, documented in
+// IMPLEMENTATION_PLAN.md): map-literal bad-key error positions, and value
+// side-effect order after a bad-key abort.
+//
+// Function bodies compile to chunks attached on the FuncDecl node as
+// node["ijvmChunk"]; evaluateFunctionDeclaration's closure checks it first,
+// so function VALUES stay ordinary closures and mix safely with tree-walked
+// code (escaped statements, bailed parents). The ONLY chunk bail is a nested
+// FunctionDeclaration statement (its closure must capture a live block ctx,
+// which slot frames cannot model). Upvalue reads/writes work through the
+// ctxGet/ctxAssign chain on the captured defCtx.
+//
+// Opcodes (numeric literals -- vmExec dispatch must not pay global reads):
+//    1 loadSlot    a=slot          push frame slot
+//    2 const       a=constIdx      push constant (consts are append-only,
+//                                  NEVER interned: int 5 vs double 5.0 would
+//                                  collide on a string key and corrupt math)
+//    3 infix       a=constIdx      pop r, pop l, push applyInfixOperator
+//    4 jumpIfFalse a=target        pop cond, jump when falsy
+//    5 call        a=argc          stack [fn,a1..aN] -> fn([args]); push res
+//    6 loadName    a=symIdx        push ctxGet(frameCtx, name, pos)
+//    7 storeSlot   a=slot          slot = top (top KEPT: statement value)
+//    8 jump        a=target
+//    9 pop                         drop top (between block statements)
+//   10 index       a=nodeIdx       pop idx, pop coll, push indexed read
+//   11 checkCallee a=target b=nodeIdx  if top==null: throw "Cannot call
+//                                  null", replace with null result, jump past
+//                                  the call (args must NOT be evaluated)
+//   12 storeName   a=symIdx        top = ctxAssign(frameCtx, name, top, pos)
+//   13 return                      pop and return from chunk
+//   14 prefix      a=constIdx      top = applyPrefixOperator(op, top)
+//   15 array       a=count         build array literal from stack
+//   16 map         a=pairCount b=nodeIdx  build map literal (key checks)
+//   17 indexStore  a=nodeIdx       pop v, idx, coll; push assign result
+//   18 defineName  a=symIdx        top = ctxDefine(frameCtx, name, top)
+//                                  (top-level `let` only)
+// ============================================================================
+
+let ijvmStack = [];
+let ijvmSP = 0;
+let ijvmStatChunks = 0;
+let ijvmStatBails = 0;
+
+def ijvmEnsureStack(need) {
+    let stack = ijvmStack;
+    let n = len(stack);
+    while (n < need) {
+        push(stack, null);
+        n = n + 1;
+    }
+    return null;
+}
+
+def ijvmNewChunk(name) {
+    let ch = {};
+    ch["name"] = name;
+    ch["ops"] = [];
+    ch["a"] = [];
+    ch["b"] = [];
+    ch["consts"] = [];
+    ch["names"] = [];
+    ch["poss"] = [];
+    ch["nodes"] = [];
+    ch["numParams"] = 0;
+    ch["numSlots"] = 0;
+    ch["maxDepth"] = 8;
+    return ch;
+}
+
+def ijvmEmit(chunk, op, a, b) {
+    push(chunk["ops"], op);
+    push(chunk["a"], a);
+    push(chunk["b"], b);
+    return len(chunk["ops"]) - 1;
+}
+
+def ijvmHere(chunk) {
+    return len(chunk["ops"]);
+}
+
+def ijvmPatchA(chunk, at, target) {
+    let arr = chunk["a"];
+    arr[at] = target;
+    return null;
+}
+
+def ijvmConst(chunk, v) {
+    push(chunk["consts"], v);
+    return len(chunk["consts"]) - 1;
+}
+
+def ijvmSym(chunk, name, pos) {
+    push(chunk["names"], name);
+    push(chunk["poss"], pos);
+    return len(chunk["names"]) - 1;
+}
+
+def ijvmNodeRef(chunk, nd) {
+    push(chunk["nodes"], nd);
+    return len(chunk["nodes"]) - 1;
+}
+
+// Mirror of makeIndexExpression's evaluate (read path). The _isArray quirk
+// is reproduced without the per-read keys() alloc: the keys() scan only
+// runs when the map actually has a non-null "_isArray" entry (never true in
+// practice). Scalars route to the map-read so the meta-level poison flow
+// matches the tree-walker's keys(scalar) behavior.
+def ijvmIndexLoad(coll, idx, node) {
+    if (isArray(coll)) {
+        let arrayLength = len(coll);
+        if (idx < 0 || idx >= arrayLength) {
+            throwRuntimeError(
+                "Array index out of bounds: " + idx + ", array size: " + arrayLength,
+                node["position"]["line"],
+                node["position"]["column"]
+            );
+        }
+        return coll[idx];
+    }
+    let mapType = false;
+    if (coll != null) {
+        if (isMap(coll)) {
+            mapType = true;
+            if (coll["_isArray"] != null) {
+                let keyList = keys(coll);
+                if (len(keyList) == 1) {
+                    if (keyList[0] == "_isArray") {
+                        mapType = false;
+                    }
+                }
+            }
+        } else {
+            mapType = true;
+        }
+    }
+    if (mapType) {
+        let isStr = isString(idx);
+        let isNum = isNumber(idx);
+        if (!(isStr || isNum)) {
+            throwRuntimeError("Map key must be a string or number, got: " + idx, 0 - 1, 0 - 1);
+        }
+        return coll[idx];
+    }
+    throwRuntimeError(
+        "Cannot use index operator on non-collection value, got: " + coll,
+        node["position"]["line"],
+        node["position"]["column"]
+    );
+    return null;
+}
+
+// Mirror of indexAssignmentStatement_evaluate (write path); reuses the very
+// same assignToArray/assignToMap helpers so error text/behavior is identical.
+def ijvmIndexPut(coll, idx, v, node) {
+    if (isArray(coll)) {
+        return assignToArray(coll, idx, v, node["position"]);
+    } else {
+        if (isMap(coll)) {
+            return assignToMap(coll, idx, v, node["position"]);
+        } else {
+            throwRuntimeError("Cannot use index operator on non-collection value, got:" + coll, node["position"]);
+            return null;
+        }
+    }
+}
+
+// Mirror of makeMapLiteral's broken bad-key path: it calls
+// throw(RuntimeError(...)) where neither name exists, so the tree-walker
+// aborts via ctxGet "Undefined variable 'throw'" then "Cannot call null".
+// Positions cite the map literal node here (tree-walk cites interpreter-
+// internal source) -- accepted divergence on this pathological abort path.
+def ijvmBadMapKey(node, ctx) {
+    ctxGet(ctx, "throw", node["position"]);
+    throwRuntimeError(RuntimeError_create("Cannot call null as a function", node["position"]));
+    return null;
+}
+
+// The dispatch loop. frameCtx = captured defCtx for function chunks, the
+// program context for top-level statement chunks. Slot window lives on the
+// shared ijvmStack at [base, base+numSlots); the expression stack works the
+// region above it. Reentrancy: our caller parked ijvmSP at the top of this
+// frame's reserved window, so closures invoked by op 5 base their frames
+// above ours and cannot clobber it.
+def ijvmExec(chunk, base, frameCtx) {
+    let ops = chunk["ops"];
+    let aArr = chunk["a"];
+    let bArr = chunk["b"];
+    let consts = chunk["consts"];
+    let names = chunk["names"];
+    let poss = chunk["poss"];
+    let nodes = chunk["nodes"];
+    let stack = ijvmStack;
+    let sp = base + chunk["numSlots"];
+    let pc = 0;
+    let n = len(ops);
+    while (pc < n) {
+        let op = ops[pc];
+        if (op < 7) {
+            if (op == 1) { // loadSlot
+                stack[sp] = stack[base + aArr[pc]];
+                sp = sp + 1;
+                pc = pc + 1;
+            } else { if (op == 2) { // const
+                stack[sp] = consts[aArr[pc]];
+                sp = sp + 1;
+                pc = pc + 1;
+            } else { if (op == 3) { // infix
+                let r = stack[sp - 1];
+                sp = sp - 1;
+                stack[sp - 1] = applyInfixOperator(stack[sp - 1], consts[aArr[pc]], r);
+                pc = pc + 1;
+            } else { if (op == 4) { // jumpIfFalse (pop)
+                let c = stack[sp - 1];
+                sp = sp - 1;
+                let t = false;
+                if (c == true) {
+                    t = true;
+                } else {
+                    if (c != false) {
+                        t = EvaluatorIsTruthy(c);
+                    }
+                }
+                if (t) {
+                    pc = pc + 1;
+                } else {
+                    pc = aArr[pc];
+                }
+            } else { if (op == 5) { // call
+                let argc = aArr[pc];
+                let args = [];
+                let j = sp - argc;
+                while (j < sp) {
+                    push(args, stack[j]);
+                    j = j + 1;
+                }
+                sp = sp - argc;
+                let fv = stack[sp - 1];
+                stack[sp - 1] = fv(args);
+                pc = pc + 1;
+            } else { // op == 6: loadName
+                stack[sp] = ctxGet(frameCtx, names[aArr[pc]], poss[aArr[pc]]);
+                sp = sp + 1;
+                pc = pc + 1;
+            } } } } }
+        } else { if (op < 13) {
+            if (op == 7) { // storeSlot (keep top)
+                stack[base + aArr[pc]] = stack[sp - 1];
+                pc = pc + 1;
+            } else { if (op == 8) { // jump
+                pc = aArr[pc];
+            } else { if (op == 9) { // pop
+                sp = sp - 1;
+                pc = pc + 1;
+            } else { if (op == 10) { // index read
+                let idxv = stack[sp - 1];
+                sp = sp - 1;
+                stack[sp - 1] = ijvmIndexLoad(stack[sp - 1], idxv, nodes[aArr[pc]]);
+                pc = pc + 1;
+            } else { if (op == 11) { // checkCallee
+                if (stack[sp - 1] == null) {
+                    let nd = nodes[bArr[pc]];
+                    throwRuntimeError(RuntimeError_create("Cannot call null as a function", nd["position"]));
+                    stack[sp - 1] = null;
+                    pc = aArr[pc];
+                } else {
+                    pc = pc + 1;
+                }
+            } else { // op == 12: storeName (keep result)
+                stack[sp - 1] = ctxAssign(frameCtx, names[aArr[pc]], stack[sp - 1], poss[aArr[pc]]);
+                pc = pc + 1;
+            } } } } }
+        } else {
+            if (op == 13) { // return
+                return stack[sp - 1];
+            } else { if (op == 14) { // prefix
+                stack[sp - 1] = applyPrefixOperator(consts[aArr[pc]], stack[sp - 1]);
+                pc = pc + 1;
+            } else { if (op == 15) { // array literal
+                let cnt = aArr[pc];
+                let arr2 = [];
+                let j2 = sp - cnt;
+                while (j2 < sp) {
+                    push(arr2, stack[j2]);
+                    j2 = j2 + 1;
+                }
+                sp = sp - cnt;
+                stack[sp] = arr2;
+                sp = sp + 1;
+                pc = pc + 1;
+            } else { if (op == 16) { // map literal
+                let take = aArr[pc] * 2;
+                let m2 = {};
+                let j3 = sp - take;
+                while (j3 < sp) {
+                    let k2 = stack[j3];
+                    let keyOk = false;
+                    if (isString(k2)) { keyOk = true; }
+                    if (isNumber(k2)) { keyOk = true; }
+                    if (!keyOk) {
+                        ijvmBadMapKey(nodes[bArr[pc]], frameCtx);
+                    }
+                    m2[k2] = stack[j3 + 1];
+                    j3 = j3 + 2;
+                }
+                sp = sp - take;
+                stack[sp] = m2;
+                sp = sp + 1;
+                pc = pc + 1;
+            } else { if (op == 17) { // indexStore
+                let v3 = stack[sp - 1];
+                let i3 = stack[sp - 2];
+                sp = sp - 2;
+                stack[sp - 1] = ijvmIndexPut(stack[sp - 1], i3, v3, nodes[aArr[pc]]);
+                pc = pc + 1;
+            } else { // op == 18: defineName (keep result)
+                stack[sp - 1] = ctxDefine(frameCtx, names[aArr[pc]], stack[sp - 1]);
+                pc = pc + 1;
+            } } } } }
+        }
+        }
+    }
+    return null; // unreachable: every chunk ends with op 13
+}
+
+// Invoke a function chunk: bind params (null-pad missing, drop extras --
+// the IJ tree-walk closure's exact arity behavior), reserve the frame
+// window, run. Non-param slots need no init: compile order guarantees every
+// slot is stored (its `let` runs) before any read at the same pc range.
+def ijvmCallChunk(chunk, defCtx, args) {
+    let base = ijvmSP;
+    let numSlots = chunk["numSlots"];
+    let top = base + numSlots + chunk["maxDepth"];
+    ijvmEnsureStack(top);
+    let stack = ijvmStack;
+    let np = chunk["numParams"];
+    let na = len(args);
+    let i = 0;
+    while (i < np) {
+        if (i < na) {
+            stack[base + i] = args[i];
+        } else {
+            stack[base + i] = null;
+        }
+        i = i + 1;
+    }
+    ijvmSP = top;
+    let r = ijvmExec(chunk, base, defCtx);
+    ijvmSP = base;
+    return r;
+}
+
+// Run a compiled top-level statement chunk against the program context.
+def ijvmRunTopChunk(chunk, ctx) {
+    let base = ijvmSP;
+    let top = base + chunk["numSlots"] + chunk["maxDepth"];
+    ijvmEnsureStack(top);
+    ijvmSP = top;
+    let r = ijvmExec(chunk, base, ctx);
+    ijvmSP = base;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Compiler: AST (MapValue nodes) -> chunk. st fields:
+//   "symtab"   name -> slot for the CURRENT compile position (block-scoped
+//              shadows handled by ijvmCompileBlock's local record list)
+//   "numSlots" frame slot high-water
+//   "topLevel" true for per-statement program chunks: depth-0 `let` becomes
+//              defineName (must bind in the real program ctx); block-nested
+//              `let`s still use slots (they are transient, exactly like the
+//              tree-walker's per-block contexts)
+//   "blockDepth" 0 at statement root
+//   "ok"       bail flag -- false aborts the whole chunk (caller discards)
+// ---------------------------------------------------------------------------
+
+def ijvmCompileExpr(chunk, node, st) {
+    if (st["ok"] != true) { return null; }
+    if (node == null) {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        return null;
+    }
+    let t = node["type"];
+    if (t == "NumberLiteral") {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, node["value"]), 0);
+        return null;
+    }
+    if (t == "StringLiteral") {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, node["value"]), 0);
+        return null;
+    }
+    if (t == "BooleanLiteral") {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, node["value"]), 0);
+        return null;
+    }
+    if (t == "NullLiteral") {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        return null;
+    }
+    if (t == "Identifier") {
+        let symtab = st["symtab"];
+        let slot = symtab[node["name"]];
+        if (slot != null) {
+            ijvmEmit(chunk, 1, slot, 0);
+        } else {
+            ijvmEmit(chunk, 6, ijvmSym(chunk, node["name"], node["position"]), 0);
+        }
+        return null;
+    }
+    if (t == "InfixExpression") {
+        ijvmCompileExpr(chunk, node["left"], st);
+        ijvmCompileExpr(chunk, node["right"], st);
+        ijvmEmit(chunk, 3, ijvmConst(chunk, node["operator"]), 0);
+        return null;
+    }
+    if (t == "PrefixExpression") {
+        ijvmCompileExpr(chunk, node["right"], st);
+        ijvmEmit(chunk, 14, ijvmConst(chunk, node["operator"]), 0);
+        return null;
+    }
+    if (t == "CallExpression") {
+        ijvmCompileExpr(chunk, node["callee"], st);
+        let ckAt = ijvmEmit(chunk, 11, 0, ijvmNodeRef(chunk, node));
+        let argNodes = node["arguments"];
+        let argc = 0;
+        if (argNodes != null) {
+            argc = len(argNodes);
+            let ai = 0;
+            while (ai < argc) {
+                ijvmCompileExpr(chunk, argNodes[ai], st);
+                ai = ai + 1;
+            }
+        }
+        ijvmEmit(chunk, 5, argc, 0);
+        ijvmPatchA(chunk, ckAt, ijvmHere(chunk));
+        return null;
+    }
+    if (t == "IndexExpression") {
+        ijvmCompileExpr(chunk, node["collection"], st);
+        ijvmCompileExpr(chunk, node["index"], st);
+        ijvmEmit(chunk, 10, ijvmNodeRef(chunk, node), 0);
+        return null;
+    }
+    if (t == "ArrayLiteral") {
+        let elems = node["elements"];
+        let cnt = 0;
+        if (elems != null) {
+            cnt = len(elems);
+            let ei = 0;
+            while (ei < cnt) {
+                ijvmCompileExpr(chunk, elems[ei], st);
+                ei = ei + 1;
+            }
+        }
+        ijvmEmit(chunk, 15, cnt, 0);
+        return null;
+    }
+    if (t == "MapLiteral") {
+        let pairs = node["pairs"];
+        let pcnt = 0;
+        if (pairs != null) {
+            pcnt = len(pairs);
+            let pi = 0;
+            while (pi < pcnt) {
+                let pair = pairs[pi];
+                ijvmCompileExpr(chunk, pair["key"], st);
+                ijvmCompileExpr(chunk, pair["value"], st);
+                pi = pi + 1;
+            }
+        }
+        ijvmEmit(chunk, 16, pcnt, ijvmNodeRef(chunk, node));
+        return null;
+    }
+    st["ok"] = false;
+    return null;
+}
+
+def ijvmCompileStmt(chunk, node, st, declared, shadows) {
+    if (st["ok"] != true) { return null; }
+    if (node == null) {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        return null;
+    }
+    let t = node["type"];
+    if (t == "VariableDeclaration") {
+        // Initializer FIRST (let x = x + 1 reads the OUTER x), then declare.
+        if (node["initializer"] != null) {
+            ijvmCompileExpr(chunk, node["initializer"], st);
+        } else {
+            ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        }
+        let atRoot = false;
+        if (st["topLevel"] == true) {
+            if (st["blockDepth"] == 0) { atRoot = true; }
+        }
+        if (atRoot) {
+            ijvmEmit(chunk, 18, ijvmSym(chunk, node["name"], node["position"]), 0);
+        } else {
+            let name = node["name"];
+            let slot = declared[name];
+            if (slot == null) {
+                slot = st["numSlots"];
+                st["numSlots"] = slot + 1;
+                declared[name] = slot;
+                let symtab = st["symtab"];
+                let rec = {};
+                rec["name"] = name;
+                let old = symtab[name];
+                if (old == null) {
+                    rec["had"] = false;
+                    rec["old"] = 0;
+                } else {
+                    rec["had"] = true;
+                    rec["old"] = old;
+                }
+                push(shadows, rec);
+                symtab[name] = slot;
+            }
+            ijvmEmit(chunk, 7, slot, 0);
+        }
+        return null;
+    }
+    if (t == "AssignmentStatement") {
+        ijvmCompileExpr(chunk, node["value"], st);
+        let symtab = st["symtab"];
+        let slot = symtab[node["name"]];
+        if (slot != null) {
+            ijvmEmit(chunk, 7, slot, 0);
+        } else {
+            ijvmEmit(chunk, 12, ijvmSym(chunk, node["name"], node["position"]), 0);
+        }
+        return null;
+    }
+    if (t == "ExpressionStatement") {
+        if (node["expression"] != null) {
+            ijvmCompileExpr(chunk, node["expression"], st);
+        } else {
+            ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        }
+        return null;
+    }
+    if (t == "IndexAssignmentStatement") {
+        ijvmCompileExpr(chunk, node["collection"], st);
+        ijvmCompileExpr(chunk, node["index"], st);
+        ijvmCompileExpr(chunk, node["value"], st);
+        ijvmEmit(chunk, 17, ijvmNodeRef(chunk, node), 0);
+        return null;
+    }
+    if (t == "IfStatement") {
+        ijvmCompileExpr(chunk, node["condition"], st);
+        let jf = ijvmEmit(chunk, 4, 0, 0);
+        ijvmCompileBlock(chunk, node["consequence"], st);
+        let jend = ijvmEmit(chunk, 8, 0, 0);
+        ijvmPatchA(chunk, jf, ijvmHere(chunk));
+        if (node["alternative"] != null) {
+            ijvmCompileBlock(chunk, node["alternative"], st);
+        } else {
+            ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        }
+        ijvmPatchA(chunk, jend, ijvmHere(chunk));
+        return null;
+    }
+    if (t == "WhileStatement") {
+        // Statement value = last completed body value (null if 0 iterations).
+        ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        let ltop = ijvmHere(chunk);
+        ijvmCompileExpr(chunk, node["condition"], st);
+        let jf = ijvmEmit(chunk, 4, 0, 0);
+        ijvmEmit(chunk, 9, 0, 0);
+        ijvmCompileBlock(chunk, node["body"], st);
+        ijvmEmit(chunk, 8, ltop, 0);
+        ijvmPatchA(chunk, jf, ijvmHere(chunk));
+        return null;
+    }
+    if (t == "BlockStatement") {
+        ijvmCompileBlock(chunk, node, st);
+        return null;
+    }
+    if (t == "ReturnStatement") {
+        if (st["topLevel"] == true) {
+            // A top-level return must stop the whole program loop; the
+            // escape path's ReturnValue wrapper handles that. Bail.
+            st["ok"] = false;
+            return null;
+        }
+        if (node["value"] != null) {
+            ijvmCompileExpr(chunk, node["value"], st);
+        } else {
+            ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        }
+        ijvmEmit(chunk, 13, 0, 0);
+        return null;
+    }
+    // FunctionDeclaration (closure must capture a live ctx) or unknown.
+    st["ok"] = false;
+    return null;
+}
+
+def ijvmCompileBlock(chunk, blockNode, st) {
+    if (st["ok"] != true) { return null; }
+    if (blockNode == null) {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+        return null;
+    }
+    if (blockNode["type"] != "BlockStatement") {
+        // if/while consequence/body is always a block in this parser, but
+        // stay defensive: compile as a single statement.
+        ijvmCompileStmt(chunk, blockNode, st, {}, []);
+        return null;
+    }
+    st["blockDepth"] = st["blockDepth"] + 1;
+    let declared = {};
+    let shadows = [];
+    let stmts = blockNode["statements"];
+    let n = len(stmts);
+    if (n == 0) {
+        ijvmEmit(chunk, 2, ijvmConst(chunk, null), 0);
+    }
+    let i = 0;
+    while (i < n) {
+        if (i > 0) {
+            ijvmEmit(chunk, 9, 0, 0);
+        }
+        ijvmCompileStmt(chunk, stmts[i], st, declared, shadows);
+        i = i + 1;
+    }
+    // Block exit: restore the symtab view (the tree-walker's block ctx dies).
+    let symtab = st["symtab"];
+    let k = len(shadows) - 1;
+    while (k >= 0) {
+        let rec = shadows[k];
+        if (rec["had"]) {
+            symtab[rec["name"]] = rec["old"];
+        } else {
+            symtab[rec["name"]] = null;
+        }
+        k = k - 1;
+    }
+    st["blockDepth"] = st["blockDepth"] - 1;
+    return null;
+}
+
+// Compile a FunctionDeclaration body into a chunk. Returns null on bail
+// (nested def / unknown node) -- the closure then tree-walks the body.
+def ijvmCompileFunc(funcNode) {
+    let body = funcNode["body"];
+    if (body == null) { return null; }
+    let chunk = ijvmNewChunk(funcNode["name"]);
+    let st = {};
+    st["symtab"] = {};
+    st["numSlots"] = 0;
+    st["topLevel"] = false;
+    st["blockDepth"] = 0;
+    st["ok"] = true;
+    let params = funcNode["parameters"];
+    let np = 0;
+    if (params != null) {
+        np = len(params);
+        let symtab = st["symtab"];
+        let i = 0;
+        while (i < np) {
+            symtab[params[i]] = i;
+            i = i + 1;
+        }
+    }
+    chunk["numParams"] = np;
+    st["numSlots"] = np;
+    ijvmCompileBlock(chunk, body, st);
+    ijvmEmit(chunk, 13, 0, 0);
+    if (st["ok"] != true) { return null; }
+    chunk["numSlots"] = st["numSlots"];
+    chunk["maxDepth"] = len(chunk["ops"]) + 8;
+    return chunk;
+}
+
+// Compile one top-level program statement. Returns null -> escape to the
+// tree-walk (FuncDecl declarations, statements containing returns/defs).
+def ijvmCompileTopStmt(stmt) {
+    let chunk = ijvmNewChunk("top");
+    let st = {};
+    st["symtab"] = {};
+    st["numSlots"] = 0;
+    st["topLevel"] = true;
+    st["blockDepth"] = 0;
+    st["ok"] = true;
+    ijvmCompileStmt(chunk, stmt, st, {}, []);
+    ijvmEmit(chunk, 13, 0, 0);
+    if (st["ok"] != true) { return null; }
+    chunk["numSlots"] = st["numSlots"];
+    chunk["maxDepth"] = len(chunk["ops"]) + 8;
+    return chunk;
+}
+
+// Deep-walk the whole AST and attach a chunk to EVERY compilable FuncDecl
+// node (any nesting depth). Closures created later -- even by tree-walked
+// escapes or bailed parent functions -- pick the chunk up through
+// evaluateFunctionDeclaration, with their captured ctx as the chain root.
+def ijvmAttachChunks(node) {
+    if (node == null) { return null; }
+    if (!isMap(node)) { return null; }
+    let t = node["type"];
+    if (t == null) { return null; }
+    if (t == "FunctionDeclaration") {
+        let ch = ijvmCompileFunc(node);
+        if (ch != null) {
+            node["ijvmChunk"] = ch;
+            ijvmStatChunks = ijvmStatChunks + 1;
+        } else {
+            ijvmStatBails = ijvmStatBails + 1;
+        }
+    }
+    let scalarKeys = ["condition","consequence","alternative","body","left","right","collection","index","value","callee","expression","initializer"];
+    let si = 0;
+    while (si < len(scalarKeys)) {
+        let child = node[scalarKeys[si]];
+        if (child != null) {
+            if (isMap(child)) {
+                ijvmAttachChunks(child);
+            }
+        }
+        si = si + 1;
+    }
+    let arrKeys = ["statements","elements","arguments"];
+    let aj = 0;
+    while (aj < len(arrKeys)) {
+        let arr = node[arrKeys[aj]];
+        if (arr != null) {
+            if (isArray(arr)) {
+                let m = 0;
+                while (m < len(arr)) {
+                    ijvmAttachChunks(arr[m]);
+                    m = m + 1;
+                }
+            }
+        }
+        aj = aj + 1;
+    }
+    let pairs = node["pairs"];
+    if (pairs != null) {
+        if (isArray(pairs)) {
+            let p = 0;
+            while (p < len(pairs)) {
+                let pair = pairs[p];
+                if (pair != null) {
+                    if (isMap(pair)) {
+                        ijvmAttachChunks(pair["key"]);
+                        ijvmAttachChunks(pair["value"]);
+                    }
+                }
+                p = p + 1;
+            }
+        }
+    }
+    return null;
+}
+
+// VM entry: mirror of makeProgram's evaluate. Per-statement chunks with
+// tree-walk escapes interleaved; FuncDecl statements always escape (their
+// evaluateFunctionDeclaration must bind the closure in the REAL program
+// ctx), but their bodies got chunks via ijvmAttachChunks above.
+def ijvmRunProgram(ast, ctx) {
+    ijvmStatChunks = 0;
+    ijvmStatBails = 0;
+    ijvmAttachChunks(ast);
+    let stmts = ast["statements"];
+    let n = len(stmts);
+    let plans = [];
+    let nEsc = 0;
+    let i = 0;
+    while (i < n) {
+        let stmt = stmts[i];
+        let ch = null;
+        if (stmt != null) {
+            if (stmt["type"] != "FunctionDeclaration") {
+                ch = ijvmCompileTopStmt(stmt);
+            }
+        }
+        if (ch == null) { nEsc = nEsc + 1; }
+        push(plans, ch);
+        i = i + 1;
+    }
+    if (getenv("IJ_VM_DEBUG") == "1") {
+        eputs("[ijvm] stmts: " + n + " escaped: " + nEsc + " funcChunks: " + ijvmStatChunks + " funcBails: " + ijvmStatBails);
+    }
+    let result = null;
+    i = 0;
+    while (i < n) {
+        let ch = plans[i];
+        if (ch != null) {
+            result = ijvmRunTopChunk(ch, ctx);
+        } else {
+            let stmt = stmts[i];
+            result = stmt["evaluate"](stmt, ctx);
+            if (isReturnValue(result)) {
+                return result["value"];
+            }
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
 
 // Interpreter map holding state and library initializers
 def makeInterpreter() {
@@ -7530,8 +8371,20 @@ def makeInterpreter() {
         let result = null;
 
         // Manual simulated try-catch not supported, assume evaluation either succeeds or aborts program
+        // P-VM.4: the IJ-side bytecode VM is the default engine for the
+        // interpreted layers. IJ_VM=0 disables every VM (Go-side gate in the
+        // emitted main() plus this one, at all nesting depths -- getenv
+        // chains down to the native os.Getenv). IJ_VM_IJ=0 disables only the
+        // IJ-side VM, for differential isolation.
         {
-            result = self["ast"]["evaluate"](self["ast"], context);
+            let ijvmOff = false;
+            if (getenv("IJ_VM") == "0") { ijvmOff = true; }
+            if (getenv("IJ_VM_IJ") == "0") { ijvmOff = true; }
+            if (ijvmOff) {
+                result = self["ast"]["evaluate"](self["ast"], context);
+            } else {
+                result = ijvmRunProgram(self["ast"], context);
+            }
         }
 
         // Prepare evaluation result map
@@ -7638,6 +8491,10 @@ def DefaultLibraryFunctionsInitializer(context) {
     context["registerFunction"](context, "int", oneWrapper(int));
     context["registerFunction"](context, "double", oneWrapper(double));
     context["registerFunction"](context, "string", oneWrapper(string));
+    // P-VM.4: chain getenv/eputs down to the native builtins so every nested
+    // interpretation layer can read the IJ_VM gate and emit debug to stderr.
+    context["registerFunction"](context, "getenv", oneWrapper(getenv));
+    context["registerFunction"](context, "eputs", oneWrapper(eputs));
 }
 
 // StdIOLibraryFunctionsInitializer implementation with puts and gets simulation
