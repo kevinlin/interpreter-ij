@@ -1576,9 +1576,26 @@ def analyzeIsStatic(node) {
 }
 
 def resolveVariableDeclaration(node, scope) {
-    let info = resolverScopeLookup(scope, node["name"]);
-    node["resolvedKind"] = info["kind"];
-    node["resolvedOrigin"] = info["origin"];
+    // The VarDecl node's own annotation describes the binding the declaration
+    // CREATES -- root-scope lets are global/let (rkGlobalLet), everything else
+    // is local/let (rkLocal). It must NOT be the enclosing-scope resolution of
+    // the name: with sequential block resolution the lookup runs before the
+    // local declare, so a function-local `let result` inside a tree-walked
+    // body would resolve up the chain to a same-named TOP-LEVEL let and get
+    // stamped rkGlobalLet -- and the emitted evalVarDecl treats rkGlobalLet
+    // as "this IS a top-level let" and calls setTopLetGoVar, clobbering the
+    // package-level Go var of the genuine global. That was the 2026-06-12 MCP
+    // regression (eval.s's global `result` zeroed by inner-interpreter
+    // locals; latent in interpreter.s itself via makeInterpreter's
+    // `let interpreter = {}`). Identifier/Assignment nodes keep the
+    // enclosing-scope lookup -- assignment semantics genuinely write the
+    // resolved binding; only declarations create a fresh one.
+    if (scope["parent"] == null) {
+        node["resolvedKind"] = "global";
+    } else {
+        node["resolvedKind"] = "local";
+    }
+    node["resolvedOrigin"] = "let";
     node["resolvedName"] = mangle(node["name"]);
     // The enclosing scope matters for emission: root-scope lets stay dynamic
     // (ctx.Create) until a later phase, function-local lets become Go vars.

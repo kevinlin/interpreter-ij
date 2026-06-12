@@ -55,7 +55,38 @@ else
     echo "FAIL: sample.s diverges under IJ_VM=1"; fail=1
 fi
 
-# 3) Confirm the VM actually engaged (guards against a silently-dead gate).
+# 3) MCP overlay differential (P-VM.3 pre-flight): the concatenated
+#    interpreter_base.s + eval.s + mcp.s source redefines gets/puts via the
+#    override idiom, so its program chunk compiles func chunks for them --
+#    a workload shape nothing in tests/vm covers. Built fresh from source
+#    (honours IJ_BINARY) because the committed mcp binary can lag source.
+#    This also guards the 2026-06-12 resolver regression (function-local
+#    `let result` clobbering the top-level global via setTopLetGoVar).
+MCP_INPUT='{"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"x","version":"1"}},"jsonrpc":"2.0","id":0}
+{"method":"tools/call","params":{"name":"execute_script","arguments":{"script":"puts(1+22/7.0)"}},"jsonrpc":"2.0","id":1}
+{"method":"tools/call","params":{"name":"parse_script","arguments":{"script":"puts(1+22/7.0)"}},"jsonrpc":"2.0","id":2}'
+cat src/interpreter.s | src/until.rb "interpreter is ready" > "$tmp/interpreter_base.s"
+cat "$tmp/interpreter_base.s" src/eval.s src/mcp.s > "$tmp/mcp_eval.s"
+if ./src/compile-local.sh "$tmp/mcp_eval.s" "$tmp/mcp_bin" >/dev/null 2>&1; then
+    echo "$MCP_INPUT" | "$tmp/mcp_bin" 2>/dev/null > "$tmp/mcp_default.out" || true
+    echo "$MCP_INPUT" | IJ_VM=1 "$tmp/mcp_bin" 2>/dev/null > "$tmp/mcp_vm.out" || true
+    if diff -q "$tmp/mcp_default.out" "$tmp/mcp_vm.out" >/dev/null; then
+        echo "PASS: mcp_eval (IJ_VM == default)"
+    else
+        echo "FAIL: mcp_eval diverges under IJ_VM=1"
+        diff "$tmp/mcp_default.out" "$tmp/mcp_vm.out" | head -10
+        fail=1
+    fi
+    if [ -f /tmp/ij-golden/mcp-native.out ] && ! diff -q "$tmp/mcp_default.out" /tmp/ij-golden/mcp-native.out >/dev/null; then
+        echo "FAIL: fresh mcp_eval default output diverges from golden"
+        diff "$tmp/mcp_default.out" /tmp/ij-golden/mcp-native.out | head -10
+        fail=1
+    fi
+else
+    echo "FAIL: compile mcp_eval.s"; fail=1
+fi
+
+# 4) Confirm the VM actually engaged (guards against a silently-dead gate).
 stats=$(echo | IJ_VM=1 IJ_VM_DEBUG=1 ./scripts/native_interpreter.sh src/test.s 2>&1 >/dev/null | grep "program stmts" || true)
 if [ -n "$stats" ]; then
     echo "PASS: VM engaged ($stats)"
