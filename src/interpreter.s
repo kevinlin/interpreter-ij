@@ -1348,7 +1348,8 @@ def libraryFunctionNames() {
         "char", "len", "chr", "ord", "substr", "int", "string", "random",
         "typeof", "isArray", "isMap", "isNumber", "isString", "double",
         "echo", "print", "delete", "startsWith", "endsWith", "trim",
-        "match", "findAll", "replace", "split", "getenv", "eputs", "hasKey"
+        "match", "findAll", "replace", "split", "getenv", "eputs", "hasKey",
+        "ijvmExecNative"
     ];
 }
 
@@ -4606,6 +4607,431 @@ puts("}");
 puts("_, found := m.mp().findPair(k)");
 puts("return Value{tag: tBool, b: found}");
 puts("}");
+// P-VM.5c: native dispatch loop for the IJ-side bytecode VM. ijvmExec (the
+// IJ def) is now a thin wrapper that hands its chunk to this Go loop, so
+// chunk-op dispatch runs at native speed at EVERY interpretation depth: the
+// binary executing layer-A chunks calls it directly (positional hooks =
+// the binary's own ij_* functions), and each interpreted layer reaches it
+// through a chained registration (DefaultLibraryFunctionsInitializer), with
+// hooks = that layer's own function VALUES (1-arg args-array closures --
+// the meta-level encoding evaluateFunctionDeclaration gives every
+// interpreted function). The depth parameter selects the call encoding.
+// Semantic work (infix/prefix operators, ctx get/assign/define, index
+// load/store, truthiness, runtime errors) still goes through the hooks, so
+// per-layer semantics and overlay overrides behave exactly like the old
+// interpreted loop (which resolved the same names at its own layer).
+puts("type natChunk struct {");
+puts("ops []int32");
+puts("aa []int32");
+puts("bb []int32");
+puts("consts []Value");
+puts("names []Value");
+puts("poss []Value");
+puts("nodes []Value");
+puts("numSlots int");
+puts("}");
+puts("var natChunkCache = map[*MapValue]*natChunk{}");
+puts('func natChunkArr(ch *MapValue, key string) []Value {');
+puts("v := ch.Get(Value{tag: tString, s: key})");
+puts("if v.tag != tArray { return nil }");
+puts("return v.arrp().values");
+puts("}");
+puts("func natChunkInts(ch *MapValue, key string) []int32 {");
+puts("vs := natChunkArr(ch, key)");
+puts("out := make([]int32, len(vs))");
+puts("for i := 0; i < len(vs); i++ { out[i] = int32(vs[i].IntValue()) }");
+puts("return out");
+puts("}");
+// Chunks are immutable once compiled (ijvmPatchA runs during compile only),
+// so the decoded int arrays + Value slice headers are safe to cache by map
+// identity. The size bound keeps long-running MCP sessions from leaking.
+puts("func natDecodeChunk(ch *MapValue) *natChunk {");
+puts("if c, ok := natChunkCache[ch]; ok { return c }");
+puts("if len(natChunkCache) > 16384 { natChunkCache = map[*MapValue]*natChunk{} }");
+puts("nc := &natChunk{}");
+puts('nc.ops = natChunkInts(ch, "ops")');
+puts('nc.aa = natChunkInts(ch, "a")');
+puts('nc.bb = natChunkInts(ch, "b")');
+puts('nc.consts = natChunkArr(ch, "consts")');
+puts('nc.names = natChunkArr(ch, "names")');
+puts('nc.poss = natChunkArr(ch, "poss")');
+puts('nc.nodes = natChunkArr(ch, "nodes")');
+puts('nc.numSlots = ch.Get(Value{tag: tString, s: "numSlots"}).IntValue()');
+puts("natChunkCache[ch] = nc");
+puts("return nc");
+puts("}");
+// Native fast paths for the hot hook operations. Each mirrors its IJ def in
+// this file EXACTLY (applyInfixOperator, isTruthy, applyPrefixOperator,
+// ctxGet/ctxAssign/ctxDefine, ijvmIndexLoad/ijvmIndexPut); any case whose
+// fidelity is uncertain (error paths, the _isArray quirk, mixed-type "+",
+// float array indexes) reports ok=false and the op falls back to the layer's
+// hook. This removes the per-op hook Execute + depth-wrapping allocations
+// that made GC the wall-clock bottleneck when the native loop landed
+// (gctrace showed 22-24% GC under GOMAXPROCS=1), and it works at every
+// depth because contexts/collections are plain MapValue/ArrayValue data at
+// the native level no matter how many interpretation layers built them.
+// natTruthy = IJ isTruthy: arrays/maps/functions/invalid are ALWAYS truthy
+// (Value.IsTruthy is length-based for collections -- do not substitute it).
+puts("func natTruthy(v Value) bool {");
+puts("switch v.tag {");
+puts("case tNull: return false");
+puts("case tBool: return v.b");
+puts("case tInt: return v.i != 0");
+puts("case tDouble: return v.f() != 0");
+puts("case tString: return len(v.s) > 0");
+puts("}");
+puts("return true");
+puts("}");
+// Non-numeric "==" mirror (numeric pairs are handled before this is
+// consulted): null only equals null; same-typeof scalars compare; arrays,
+// maps, functions and invalids are never equal (leftEquals).
+puts("func natEq(l Value, r Value) bool {");
+puts("if l.tag == tNull { return r.tag == tNull }");
+puts("if l.tag == tString && r.tag == tString { return l.s == r.s }");
+puts("if l.tag == tBool && r.tag == tBool { return l.b == r.b }");
+puts("return false");
+puts("}");
+puts("func natInfix(l Value, op string, r Value) (Value, bool) {");
+puts("ln := l.tag == tInt || l.tag == tDouble");
+puts("rn := r.tag == tInt || r.tag == tDouble");
+puts("if ln && rn {");
+puts("switch op {");
+puts('case "+": return l.Add(r), true');
+puts('case "-": return l.Subtract(r), true');
+puts('case "*": return l.Multiply(r), true');
+puts('case "/": return l.Divide(r), true');
+puts('case "%": return l.Modulo(r), true');
+puts('case "<": return l.LessThan(r), true');
+puts('case ">": return l.BiggerThan(r), true');
+puts('case "<=": return l.LessThanEqual(r), true');
+puts('case ">=": return l.BiggerThanEqual(r), true');
+puts('case "==": return l.Equals(r), true');
+puts('case "!=": return l.Equals(r).Not(), true');
+puts("}");
+puts("return vNull(), false");
+puts("}");
+puts("switch op {");
+puts('case "+":');
+puts("if l.tag == tString && r.tag == tString { return Value{tag: tString, s: l.s + r.s}, true }");
+puts("if l.tag == tArray && r.tag == tArray { return l.Add(r), true }");
+puts('case "&&": return vBool(natTruthy(l) && natTruthy(r)), true');
+puts('case "||": return vBool(natTruthy(l) || natTruthy(r)), true');
+puts('case "==": return vBool(natEq(l, r)), true');
+puts('case "!=": return vBool(!natEq(l, r)), true');
+puts("}");
+puts("return vNull(), false");
+puts("}");
+// "-" on a number compiles to vInt(0).Subtract(v) everywhere (see
+// prefixExpressionToGoDirect); reusing it keeps -0.0 formatting identical.
+puts("func natPrefix(op string, v Value) (Value, bool) {");
+puts('if op == "!" { return vBool(!natTruthy(v)), true }');
+puts('if op == "-" {');
+puts("if v.tag == tInt || v.tag == tDouble { return vInt(0).Subtract(v), true }");
+puts("return vNull(), true");
+puts("}");
+puts("return vNull(), false");
+puts("}");
+puts('var natKeyValues = Value{tag: tString, s: "values"}');
+puts('var natKeyFunctions = Value{tag: tString, s: "functions"}');
+puts('var natKeyParent = Value{tag: tString, s: "parent"}');
+// ctxGet probe order is load-bearing: values non-null hit, then functions
+// non-null hit, then values present-but-null (explicit null binding), then
+// parent. A miss at the chain root is the undefined-variable error path ->
+// bail so the layer's hook raises it.
+puts("func natCtxGet(ctx Value, name Value) (Value, bool) {");
+puts("cur := ctx");
+puts("for cur.tag == tMap {");
+puts("cm := cur.mp()");
+puts("vv := cm.Get(natKeyValues)");
+puts("if vv.tag != tMap { return vNull(), false }");
+puts("vm := vv.mp()");
+puts("vFound := false");
+puts("if idx, ok := vm.findPair(name); ok {");
+puts("vFound = true");
+puts("if val := vm.pairs[idx].Value; val.tag != tNull { return val, true }");
+puts("}");
+puts("fv := cm.Get(natKeyFunctions)");
+puts("if fv.tag != tMap { return vNull(), false }");
+puts("if idx, ok := fv.mp().findPair(name); ok {");
+puts("if val := fv.mp().pairs[idx].Value; val.tag != tNull { return val, true }");
+puts("}");
+puts("if vFound { return vNull(), true }");
+puts("cur = cm.Get(natKeyParent)");
+puts("}");
+puts("return vNull(), false");
+puts("}");
+puts("func natCtxAssign(ctx Value, name Value, val Value) (Value, bool) {");
+puts("cur := ctx");
+puts("for cur.tag == tMap {");
+puts("cm := cur.mp()");
+puts("vv := cm.Get(natKeyValues)");
+puts("if vv.tag != tMap { return vNull(), false }");
+puts("vm := vv.mp()");
+puts("if idx, ok := vm.findPair(name); ok { vm.pairs[idx].Value = val; return val, true }");
+puts("cur = cm.Get(natKeyParent)");
+puts("}");
+puts("return vNull(), false");
+puts("}");
+puts("func natCtxDefine(ctx Value, name Value, val Value) (Value, bool) {");
+puts("if ctx.tag != tMap { return vNull(), false }");
+puts("vv := ctx.mp().Get(natKeyValues)");
+puts("if vv.tag != tMap { return vNull(), false }");
+puts("vv.mp().Put(name, val)");
+puts("return val, true");
+puts("}");
+// Index load: scalars route through Value.Get so the meta-level poison flow
+// (invalid values) matches ijvmIndexLoad's map-read of a scalar. Maps with a
+// "_isArray" key and out-of-bounds/non-int array reads bail to the hook.
+puts("func natIndexLoad(coll Value, idx Value) (Value, bool) {");
+puts("switch coll.tag {");
+puts("case tArray:");
+puts("if idx.tag != tInt { return vNull(), false }");
+puts("a := coll.arrp()");
+puts("i := int(idx.i)");
+puts("if i < 0 || i >= len(a.values) { return vNull(), false }");
+puts("return a.values[i], true");
+puts("case tMap:");
+puts("m := coll.mp()");
+puts('if _, ok := m.keyIndex["_isArray"]; ok { return vNull(), false }');
+puts("if idx.tag == tString || idx.tag == tInt || idx.tag == tDouble { return m.Get(idx), true }");
+puts("return vNull(), false");
+puts("case tNull:");
+puts("return vNull(), false");
+puts("}");
+puts("if idx.tag == tString || idx.tag == tInt || idx.tag == tDouble { return coll.Get(idx), true }");
+puts("return vNull(), false");
+puts("}");
+puts("func natIndexPut(coll Value, idx Value, v Value) (Value, bool) {");
+puts("if coll.tag == tArray {");
+puts("if idx.tag != tInt { return vNull(), false }");
+puts("a := coll.arrp()");
+puts("i := int(idx.i)");
+puts("if i < 0 || i >= len(a.values) { return vNull(), false }");
+puts("a.values[i] = v");
+puts("return v, true");
+puts("}");
+puts("if coll.tag == tMap {");
+puts("if idx.tag == tString || idx.tag == tInt || idx.tag == tDouble { coll.mp().Put(idx, v); return v, true }");
+puts("return vNull(), false");
+puts("}");
+puts("return vNull(), false");
+puts("}");
+// The loop mirrors ijvmExecFallback (src IJ def) op for op.
+//
+// DEPTH = the host layer's interpretation depth (0 = the binary executing
+// its guest's chunks; 1 = a depth-1 interpreted interpreter executing ITS
+// guest; ...). It determines the meta-level call encoding: a function value
+// created by machinery at depth d is a closure tower that unwraps
+// params.values[0] once per level, so calling it with logical args L needs
+// wrap-by-one applied d times ([L] at d=1, [[L]] at d=2, ...). Hooks are
+// the host's own machinery functions (depth wraps; depth 0 = the binary's
+// compiled defs, which take positional params). op-5 callees are guest
+// values (depth+1 wraps). The chain registration in
+// DefaultLibraryFunctionsInitializer increments depth one hop per layer.
+//
+// Hook calls at depth 0 use a per-frame reusable buffer: every callee
+// (impl wrappers, interpreted closure param binding, ijvmCallChunk slot
+// copies) COPIES values out of the args array during its prologue and
+// never retains the array itself, and re-entrancy is safe because nested
+// exec frames own their own buffers while this frame is suspended.
+// op-5/15/16 build fresh collections (those escape into program data).
+// The stack is accessed through the *ArrayValue on every op because
+// nested calls grow it via append (ijvmEnsureStack).
+puts("func ijvmExecGo(chunkV Value, stackV Value, baseV Value, frameCtx Value, hInfix Value, hPrefix Value, hCtxGet Value, hCtxAssign Value, hCtxDefine Value, hTruthy Value, hIdxLoad Value, hIdxPut Value, hErrNew Value, hThrow Value, hBadKey Value, depth int) Value {");
+puts('if chunkV.tag != tMap || stackV.tag != tArray { return vInvalid("ijvmExecNative: bad chunk or stack") }');
+puts("nc := natDecodeChunk(chunkV.mp())");
+puts("stk := stackV.arrp()");
+puts("base := baseV.IntValue()");
+puts("sp := base + nc.numSlots");
+puts("pc := 0");
+puts("n := len(nc.ops)");
+puts("var hb [4]Value");
+puts("hargs := ArrayValue{}");
+puts("callHook := func(h Value, cnt int) Value {");
+puts("if depth == 0 {");
+puts("hargs.values = hb[:cnt]");
+puts("return h.Execute(nil, &hargs)");
+puts("}");
+puts("cur := NewArrayValue(hb[:cnt]...)");
+puts("for i := 0; i < depth; i++ { cur = NewArrayValue(vArray(cur)) }");
+puts("return h.Execute(nil, cur)");
+puts("}");
+// STALE-SLICE HAZARD: `stk.values[i] = <call>` evaluates the slice header
+// BEFORE the call; a hook can re-enter ijvmEnsureStack whose append
+// reallocates the backing array, so the store would land in the dead one.
+// Every call result is therefore staged in a temp and stored afterwards
+// (re-reading stk.values through the *ArrayValue pointer).
+puts("for pc < n {");
+puts("op := nc.ops[pc]");
+puts("switch op {");
+puts("case 1:");
+puts("stk.values[sp] = stk.values[base+int(nc.aa[pc])]");
+puts("sp++");
+puts("pc++");
+puts("case 2:");
+puts("stk.values[sp] = nc.consts[nc.aa[pc]]");
+puts("sp++");
+puts("pc++");
+puts("case 3:");
+puts("r := stk.values[sp-1]");
+puts("sp--");
+puts("opv := nc.consts[nc.aa[pc]]");
+puts("rv, ok := natInfix(stk.values[sp-1], opv.s, r)");
+puts("if !ok {");
+puts("hb[0] = stk.values[sp-1]");
+puts("hb[1] = opv");
+puts("hb[2] = r");
+puts("rv = callHook(hInfix, 3)");
+puts("}");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+// natTruthy IS the layer's isTruthy (total over all tags), so op 4 never
+// calls hTruthy; the hook stays in the signature for the chain protocol.
+puts("case 4:");
+puts("c := stk.values[sp-1]");
+puts("sp--");
+puts("if natTruthy(c) { pc++ } else { pc = int(nc.aa[pc]) }");
+// op 5 mirrors the source loop's `fv(args)`: guest function values need
+// depth+1 wraps (one more than hooks -- guest values carry one more
+// closure level than the host's own machinery functions).
+puts("case 5:");
+puts("argc := int(nc.aa[pc])");
+puts("av := make([]Value, argc)");
+puts("copy(av, stk.values[sp-argc:sp])");
+puts("sp -= argc");
+puts("fv := stk.values[sp-1]");
+puts("cur := NewArrayValue(av...)");
+puts("for i := 0; i <= depth; i++ { cur = NewArrayValue(vArray(cur)) }");
+puts("rv := fv.Execute(nil, cur)");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+puts("case 6:");
+puts("si := nc.aa[pc]");
+puts("rv, ok := natCtxGet(frameCtx, nc.names[si])");
+puts("if !ok {");
+puts("hb[0] = frameCtx");
+puts("hb[1] = nc.names[si]");
+puts("hb[2] = nc.poss[si]");
+puts("rv = callHook(hCtxGet, 3)");
+puts("}");
+puts("stk.values[sp] = rv");
+puts("sp++");
+puts("pc++");
+puts("case 7:");
+puts("stk.values[base+int(nc.aa[pc])] = stk.values[sp-1]");
+puts("pc++");
+puts("case 8:");
+puts("pc = int(nc.aa[pc])");
+puts("case 9:");
+puts("sp--");
+puts("pc++");
+puts("case 10:");
+puts("idxv := stk.values[sp-1]");
+puts("sp--");
+puts("rv, ok := natIndexLoad(stk.values[sp-1], idxv)");
+puts("if !ok {");
+puts("hb[0] = stk.values[sp-1]");
+puts("hb[1] = idxv");
+puts("hb[2] = nc.nodes[nc.aa[pc]]");
+puts("rv = callHook(hIdxLoad, 3)");
+puts("}");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+puts("case 11:");
+puts("if stk.values[sp-1].tag == tNull {");
+puts("nd := nc.nodes[nc.bb[pc]]");
+puts('hb[0] = Value{tag: tString, s: "Cannot call null as a function"}');
+puts('hb[1] = nd.Get(Value{tag: tString, s: "position"})');
+puts("errv := callHook(hErrNew, 2)");
+puts("hb[0] = errv");
+puts("callHook(hThrow, 1)");
+puts("stk.values[sp-1] = vNull()");
+puts("pc = int(nc.aa[pc])");
+puts("} else {");
+puts("pc++");
+puts("}");
+puts("case 12:");
+puts("si := nc.aa[pc]");
+puts("rv, ok := natCtxAssign(frameCtx, nc.names[si], stk.values[sp-1])");
+puts("if !ok {");
+puts("hb[0] = frameCtx");
+puts("hb[1] = nc.names[si]");
+puts("hb[2] = stk.values[sp-1]");
+puts("hb[3] = nc.poss[si]");
+puts("rv = callHook(hCtxAssign, 4)");
+puts("}");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+puts("case 13:");
+puts("return stk.values[sp-1]");
+puts("case 14:");
+puts("opv := nc.consts[nc.aa[pc]]");
+puts("rv, ok := natPrefix(opv.s, stk.values[sp-1])");
+puts("if !ok {");
+puts("hb[0] = opv");
+puts("hb[1] = stk.values[sp-1]");
+puts("rv = callHook(hPrefix, 2)");
+puts("}");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+puts("case 15:");
+puts("cnt := int(nc.aa[pc])");
+puts("av := make([]Value, cnt)");
+puts("copy(av, stk.values[sp-cnt:sp])");
+puts("sp -= cnt");
+puts("stk.values[sp] = vArray(NewArrayValue(av...))");
+puts("sp++");
+puts("pc++");
+puts("case 16:");
+puts("take := int(nc.aa[pc]) * 2");
+puts("m2 := NewEmptyMapValue()");
+puts("j := sp - take");
+puts("for j < sp {");
+puts("k := stk.values[j]");
+puts("if k.tag != tString && k.tag != tInt && k.tag != tDouble {");
+puts("hb[0] = nc.nodes[nc.bb[pc]]");
+puts("hb[1] = frameCtx");
+puts("callHook(hBadKey, 2)");
+puts("}");
+puts("m2.Put(k, stk.values[j+1])");
+puts("j += 2");
+puts("}");
+puts("sp -= take");
+puts("stk.values[sp] = vMap(m2)");
+puts("sp++");
+puts("pc++");
+puts("case 17:");
+puts("v3 := stk.values[sp-1]");
+puts("i3 := stk.values[sp-2]");
+puts("sp -= 2");
+puts("rv, ok := natIndexPut(stk.values[sp-1], i3, v3)");
+puts("if !ok {");
+puts("hb[0] = stk.values[sp-1]");
+puts("hb[1] = i3");
+puts("hb[2] = v3");
+puts("hb[3] = nc.nodes[nc.aa[pc]]");
+puts("rv = callHook(hIdxPut, 4)");
+puts("}");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+puts("default:");
+puts("si := nc.aa[pc]");
+puts("rv, ok := natCtxDefine(frameCtx, nc.names[si], stk.values[sp-1])");
+puts("if !ok {");
+puts("hb[0] = frameCtx");
+puts("hb[1] = nc.names[si]");
+puts("hb[2] = stk.values[sp-1]");
+puts("rv = callHook(hCtxDefine, 3)");
+puts("}");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+puts("}");
+puts("}");
+puts("return vNull()");
+puts("}");
+puts("func ijb_ijvmExecNative(chunkV Value, stackV Value, baseV Value, frameCtx Value, h1 Value, h2 Value, h3 Value, h4 Value, h5 Value, h6 Value, h7 Value, h8 Value, h9 Value, h10 Value, h11 Value, depthV Value) Value {");
+puts("return ijvmExecGo(chunkV, stackV, baseV, frameCtx, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, depthV.IntValue())");
+puts("}");
 puts("func registerLibraryFunctions(ctx *Context) {");
 puts("ctx.Create(" + chr(34) + "puts" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("val := params.Get(Value{tag: tInt, i: 0})");
@@ -4889,6 +5315,15 @@ puts("})))");
 // new builtins land by replacing the binary in the same commit.
 puts("ctx.Create(" + chr(34) + "hasKey" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("return ijb_hasKey(params.Get(Value{tag: tInt, i: 0}), params.Get(Value{tag: tInt, i: 1}))");
+puts("})))");
+// P-VM.5c: native ijvm dispatch loop entry. 16 args: chunk, stack, base,
+// frameCtx, 11 hooks, depth. The binary's ijvmExec wrapper direct-emits
+// ijb_ijvmExecNative with depth 0; interpreted layers reach this binding
+// through the ijvmExecChain registration, which adds 1 per layer hop.
+puts("ctx.Create(" + chr(34) + "ijvmExecNative" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
+puts("p := params.values");
+puts('if len(p) < 16 { return vInvalid("ijvmExecNative: expected 16 args") }');
+puts("return ijb_ijvmExecNative(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15])");
 puts("})))");
 puts("}");
 puts("// --- Value tagged-union (Phase 1) ---");
@@ -7001,6 +7436,9 @@ def libFastEmitName(name, argc) {
     if (argc == 3) {
         if (name == "substr") { return "ijb_substr"; }
     }
+    if (argc == 16) {
+        if (name == "ijvmExecNative") { return "ijb_ijvmExecNative"; }
+    }
     return null;
 }
 
@@ -7767,7 +8205,10 @@ def ijvmBadMapKey(node, ctx) {
 // region above it. Reentrancy: our caller parked ijvmSP at the top of this
 // frame's reserved window, so closures invoked by op 5 base their frames
 // above ours and cannot clobber it.
-def ijvmExec(chunk, base, frameCtx) {
+// P-VM.5c: this IJ loop is now the FALLBACK (IJ_VM_NATEXEC=0); the default
+// path is the native Go loop -- see the ijvmExec wrapper below. Keep the two
+// loops semantically identical: vm_difftest exercises the fallback.
+def ijvmExecFallback(chunk, base, frameCtx) {
     let ops = chunk["ops"];
     let aArr = chunk["a"];
     let bArr = chunk["b"];
@@ -7906,6 +8347,54 @@ def ijvmExec(chunk, base, frameCtx) {
         }
     }
     return null; // unreachable: every chunk ends with op 13
+}
+
+// P-VM.5c: default dispatch is the native Go loop (ijb_ijvmExecNative via
+// the lib fast path). The hooks are passed as VALUES so the native loop
+// calls back into THIS layer's semantics -- each layer's overrides keep
+// working while chunk-op dispatch runs at native speed at every depth.
+// At the binary, "ijvmExecNative" direct-emits the Go builtin and depth 0
+// means "hooks are compiled defs, positional". At an interpreted layer the
+// same name resolves to the chained ijvmExecChain registration (see
+// DefaultLibraryFunctionsInitializer), which adds 1 to depth per layer hop
+// so the native loop knows how many closure-tower levels its hook /
+// callee values carry (see ijvmExecGo in goLibPrefix).
+// The hooks are hoisted into top-level lets because a bare def-as-value
+// reference direct-emits as ctx.Get(name) -- 11 root-map lookups per exec
+// call on the hottest path. Top-level lets emit as Go package vars.
+let ijvmUseNativeExec = getenv("IJ_VM_NATEXEC") != "0";
+let ijvmHookInfix = applyInfixOperator;
+let ijvmHookPrefix = applyPrefixOperator;
+let ijvmHookCtxGet = ctxGet;
+let ijvmHookCtxAssign = ctxAssign;
+let ijvmHookCtxDefine = ctxDefine;
+let ijvmHookTruthy = EvaluatorIsTruthy;
+let ijvmHookIndexLoad = ijvmIndexLoad;
+let ijvmHookIndexPut = ijvmIndexPut;
+let ijvmHookErrNew = RuntimeError_create;
+let ijvmHookThrow = throwRuntimeError;
+let ijvmHookBadKey = ijvmBadMapKey;
+
+def ijvmExec(chunk, base, frameCtx) {
+    if (ijvmUseNativeExec) {
+        return ijvmExecNative(chunk, ijvmStack, base, frameCtx,
+            ijvmHookInfix, ijvmHookPrefix, ijvmHookCtxGet, ijvmHookCtxAssign,
+            ijvmHookCtxDefine, ijvmHookTruthy, ijvmHookIndexLoad, ijvmHookIndexPut,
+            ijvmHookErrNew, ijvmHookThrow, ijvmHookBadKey, 0);
+    }
+    return ijvmExecFallback(chunk, base, frameCtx);
+}
+
+// One chain hop per interpretation layer: registered as the NEXT layer's
+// "ijvmExecNative" binding, it forwards to THIS layer's binding with
+// depth+1, so by the time the call bottoms out at the Go builtin, depth
+// equals the calling layer's interpretation depth.
+def ijvmExecChain(chunk, stack, base, frameCtx, hInfix, hPrefix, hCtxGet,
+        hCtxAssign, hCtxDefine, hTruthy, hIdxLoad, hIdxPut, hErrNew, hThrow,
+        hBadKey, depth) {
+    return ijvmExecNative(chunk, stack, base, frameCtx,
+        hInfix, hPrefix, hCtxGet, hCtxAssign, hCtxDefine, hTruthy,
+        hIdxLoad, hIdxPut, hErrNew, hThrow, hBadKey, depth + 1);
 }
 
 // Invoke a function chunk: bind params (null-pad missing, drop extras --
@@ -8619,6 +9108,17 @@ def threeWrapper(f) {
     return wrapped;
 }
 
+// P-VM.5c: arity adapter for the ijvmExecChain registration (16 params:
+// chunk, stack, base, frameCtx, 11 hooks, depth).
+def sixteenWrapper(f) {
+    def wrapped(args) {
+        return f(args[0],args[1],args[2],args[3],args[4],args[5],args[6],
+            args[7],args[8],args[9],args[10],args[11],args[12],args[13],
+            args[14],args[15]);
+    }
+    return wrapped;
+}
+
 def DefaultLibraryFunctionsInitializer(context) {
     context["registerFunction"](context, "random", zeroWrapper(random));
     context["registerFunction"](context, "assert", twoWrapper(assert));
@@ -8630,6 +9130,14 @@ def DefaultLibraryFunctionsInitializer(context) {
     // interpretation layer can read the IJ_VM gate and emit debug to stderr.
     context["registerFunction"](context, "getenv", oneWrapper(getenv));
     context["registerFunction"](context, "eputs", oneWrapper(eputs));
+    // P-VM.5c: chain the native ijvm dispatch loop down to every nested
+    // layer. The guest's "ijvmExecNative" binds THIS layer's ijvmExecChain,
+    // which forwards to THIS layer's own "ijvmExecNative" binding with
+    // depth+1 -- so the call bottoms out at the Go builtin carrying the
+    // exact interpretation depth, which selects the closure-tower call
+    // encoding for hooks and callees. The binary's own ijvmExec never
+    // consults this: it direct-emits ijb_ijvmExecNative with depth 0.
+    context["registerFunction"](context, "ijvmExecNative", sixteenWrapper(ijvmExecChain));
 }
 
 // StdIOLibraryFunctionsInitializer implementation with puts and gets simulation

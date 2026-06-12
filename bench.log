@@ -587,3 +587,41 @@ real	0m0.044s
 user	0m0.012s
 sys	0m0.021s
 
+=== 2026-06-12T08:36:35Z label=P-VM.5c native ijvm exec loop fresh=1 repeat=3 binary=/tmp/ij-fresh ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=23.836s user=13.137s
+  run 2: real=26.231s user=13.219s
+  run 3: real=22.792s user=13.096s
+  real: min=22.79s median=23.84s max=26.23s
+  user: min=13.10s median=13.14s max=13.22s
+  headline (min real, GOMAXPROCS=1): 22.79s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m1.775s
+user	0m1.423s
+sys	0m0.240s
+-- native_interpreter.sh sample.s --
+
+real	0m0.079s
+user	0m0.013s
+sys	0m0.023s
+
+=== 2026-06-12T09:08:55Z label=P-VM.5c native exec + nat fast paths fresh=1 repeat=3 binary=/tmp/ij-fresh ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=14.099s user=9.427s
+  run 2: real=16.432s user=9.468s
+  run 3: real=12.342s user=9.065s
+  real: min=12.34s median=14.10s max=16.43s
+  user: min=9.06s median=9.43s max=9.47s
+  headline (min real, GOMAXPROCS=1): 12.34s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m1.014s
+user	0m1.532s
+sys	0m0.277s
+-- native_interpreter.sh sample.s --
+
+real	0m0.198s
+user	0m0.013s
+sys	0m0.024s
+
