@@ -161,13 +161,18 @@ def fix_app_go(content: str) -> str:
         "\treturn Value{tag: tArray, arr: NewArrayValue(elements...)}\n"
         "}\n\n"
     )
-    # Only inject bool helpers if not already in the preamble
-    if "func EqualsBool(a, b Value) bool" not in content[:content.find("\nfunc main() {")]:
+    # Only inject bool helpers if not already in the preamble. The guard is
+    # newline-anchored: since P-VM.5 the prelude emitter (goLibPrefix) defines
+    # these helpers itself, and its transpiled body carries the definition
+    # text as mid-line Go STRING LITERALS before main() — an unanchored
+    # substring match would false-positive on those and skip a needed
+    # injection (stage1: old prelude without the helpers + new emitter data).
+    if "\nfunc EqualsBool(a, b Value) bool" not in content[:content.find("\nfunc main() {")]:
         content = content.replace(
             "\nfunc main() {", "\n" + bool_helpers + "func main() {"
         )
-    # Only inject AsValue wrappers if not already present
-    if "func NewArrayValueAsValue" not in content[:content.find("\nfunc main() {")]:
+    # Only inject AsValue wrappers if not already present (same anchoring)
+    if "\nfunc NewArrayValueAsValue" not in content[:content.find("\nfunc main() {")]:
         content = content.replace(
             "\nfunc main() {", "\n" + wrappers + "func main() {"
         )
