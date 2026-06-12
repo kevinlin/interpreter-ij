@@ -6,14 +6,26 @@ Succinct rules for how to BUILD the project:
 ./src/compile-local.sh src/interpreter.s /tmp/ij_stage1  # transpile + compile
 # Fresh self-builds emit a complete func main() and pass tests.
 # COMMITTED BRIDGE (interpreter_mac_arm64) IS the true fixed point (since
-# 2026-05-29; d17ae10f... after P-VM.4). A fresh compile-local
+# 2026-05-29; f60f0b0f... after P-VM.5a). A fresh compile-local
 # byte-equals the committed binary (verify.sh check 5 enforces it). Recover the
 # old one-way bridge only for forensics: git show 062e95c:interpreter_mac_arm64.
 # interpreter_linux_amd64 is STILL the old frozen bridge -> rebuild on a
-# linux/Docker host. mcp_mac_arm64 rebuilt with P-VM.4 (e9b81ea5...).
+# linux/Docker host. mcp_mac_arm64 rebuilt with P-VM.5a (dccaa259...).
 # Default `bench.sh` measures current source.
-# P-VM.4 (2026-06-12): selfhost 123.99s -> 34.94s = 3.55x same-session pinned.
-# Remaining to <=7s goal: 5x -> P-VM.5 (lean Value ~2.4x + close chunk bails).
+# P-VM.5a (2026-06-12): selfhost 34.51s -> 24.29s = 1.42x same-session pinned.
+# Remaining to <=7s goal: 3.5x -> P-VM.5 (lean Value ~2.4x + close chunk bails).
+#
+# NEW-BUILTIN GOTCHA: once a commit adds a builtin (getenv, hasKey, ...), OLD
+# binaries cannot interpret NEW source (undefined variable). Bench controls
+# for an old commit must run old binary + OLD SOURCE from `git worktree add
+# /tmp/ctrl <old-sha>` -- IJ_BINARY=<old> alone panics on new source.
+# Adding a builtin = goLibPrefix ijb_* impl + ctx.Create + libraryFunctionNames
+# + interpreted-layer chain (e.g. twoWrapper in *LibraryFunctionsInitializer);
+# replace the committed binary in the same commit.
+# Hot builtins also get a direct-emit fast path: libFastEmitName table ->
+# CallExpression_toGoDirect emits ijb_<name>(args) for resolvedOrigin=="lib"
+# callees with exact arity (skips the Execute/NewArrayValue shim).
+# CPU profile: IJ_CPUPROFILE=/tmp/x.pprof is wired into the emitted main().
 #
 # ARITY GOTCHA: positional-arg conv enforces Go arity. IJ source tolerates
 # caller-arity != callee-arity (extras dropped; missing params are UNBOUND --
@@ -50,9 +62,9 @@ Run these after implementing to get immediate feedback:
 
 - Tests: `bash scripts/test.sh` (~3s)
 - VM differential (default VM must equal IJ_VM=0 eval; ~25s incl. a fresh MCP build): `bash scripts/vm_difftest.sh` (honours `IJ_BINARY=<stage2>` — use it to test VM changes BEFORE replacing the committed binary; stage1 is parity-blind)
-- Verify (5 checks): `bash scripts/verify.sh` (~9–10 min — checks 1–4 fast, check 5 is two `compile-local.sh` runs)
+- Verify (5 checks): `bash scripts/verify.sh` (~1–2 min since P-VM.4/5a — checks 1–4 fast, check 5 is two `compile-local.sh` runs)
 - Bench (committed binary, quick single-run smoke; unreliable for decisions): `bash scripts/bench.sh <label>`. The committed binary is now current source, so this is meaningful again — but still single-run; use `--repeat 3` for decisions.
-- Bench source work (builds fixed-point stage2, min/median/max under GOMAXPROCS=1): `bash scripts/bench.sh --fresh --repeat 3 <label>` (~2 fast builds + N×~35s selfhost since P-VM.4). Pinned min-of-3 noise band is ~1.01×, so the 1.3× drop-rule is enforceable.
+- Bench source work (builds fixed-point stage2, min/median/max under GOMAXPROCS=1): `bash scripts/bench.sh --fresh --repeat 3 <label>` (~2 fast builds + N×~24s selfhost since P-VM.5a). Pinned min-of-3 noise band is ~1.01×, so the 1.3× drop-rule is enforceable.
 - Re-capture goldens: `bash scripts/verify.sh --capture`
 
 Note: `verify.sh` check 5 now enforces the TRUE fixed point (committed binary == self-transpile output), tightened 2026-05-29 from the old determinism-only check.

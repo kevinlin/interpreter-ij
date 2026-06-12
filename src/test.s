@@ -120,6 +120,15 @@ assert(person["name"] == "Bob", "Map key assignment");
 let mapKeys = keys(person);
 assert(len(mapKeys) == 2, "Map keys count");
 
+// hasKey builtin (O(1) key presence)
+assert(hasKey(person, "name"), "hasKey finds present key");
+assert(!hasKey(person, "missing"), "hasKey misses absent key");
+assert(!hasKey([1, 2], 0), "hasKey on array is false");
+assert(!hasKey(null, "k"), "hasKey on null is false");
+assert(!hasKey(5, "k"), "hasKey on scalar is false");
+let nullBinding = {"k": null};
+assert(hasKey(nullBinding, "k"), "hasKey sees explicit null binding");
+
 // String operations
 let greeting = "Hello";
 let name = "World";

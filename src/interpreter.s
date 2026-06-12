@@ -1348,7 +1348,7 @@ def libraryFunctionNames() {
         "char", "len", "chr", "ord", "substr", "int", "string", "random",
         "typeof", "isArray", "isMap", "isNumber", "isString", "double",
         "echo", "print", "delete", "startsWith", "endsWith", "trim",
-        "match", "findAll", "replace", "split", "getenv", "eputs"
+        "match", "findAll", "replace", "split", "getenv", "eputs", "hasKey"
     ];
 }
 
@@ -3917,18 +3917,15 @@ def getLineCol(position) { // FIXME position mess (map vs. string)
 
 
 // Helper function to check if map has key (no 'in' operator, no direct containsKey)
+// P-VM.5a: O(1) via the native hasKey builtin (findPair/keyIndex), replacing
+// the keys()-alloc + linear scan that was the #2 GC driver after the args-
+// array shim. Sole callers are ctxGet/ctxAssign on context maps, whose keys
+// are always strings, so the findPair String()-collision quirk (m[1] vs
+// m["1"]) cannot bite here. At interpreted layers hasKey chains down to the
+// native impl (MapLibraryFunctionsInitializer), so the inner interpreter's
+// own ctxAssign no longer does an interpreted full-map scan either.
 def mapHasKey(mapObj, key) {
-    // Optimize: cache length
-    let ks = keys(mapObj);
-    let n = len(ks);
-    let i = 0;
-    while (i < n) {
-        if (ks[i] == key) {
-            return true;
-        }
-        i = i + 1;
-    }
-    return false;
+    return hasKey(mapObj, key);
 }
 
 // Creates a new EvaluationContext map with initial values and attached functions
@@ -4548,6 +4545,65 @@ puts("var ijCountNewMap uint64");
 puts("var ijCountNewArr uint64");
 puts("var ijCountUpdate uint64");
 puts("var ijCountCtxPromote uint64");
+// P-VM.5a: ijb_* fixed-arity builtin impls. Single source of truth for the
+// hot builtins: the registerLibraryFunctions closures delegate here, and
+// CallExpression_toGoDirect emits direct ijb_* calls for pristine-lib
+// callees (resolvedOrigin=="lib" guarantees no top-level def/let shadows
+// the name anywhere in the program, because the resolver hoists all root
+// declarations before resolving bodies). This kills the per-call
+// Execute(ctx, NewArrayValue(...)) shim -- the top allocation source in
+// the P-VM.4 selfhost profile (NewArrayValue 5.2% + closure dispatch).
+puts("func ijb_len(x Value) Value { return Value{tag: tInt, i: int64(x.Length())} }");
+puts("func ijb_typeof(v Value) Value { return v.Type() }");
+puts("func ijb_string(v Value) Value { return Value{tag: tString, s: v.ValueString()} }");
+puts("func ijb_isArray(v Value) Value { return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "array" + chr(34) + "} }");
+puts("func ijb_isMap(v Value) Value { return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "map" + chr(34) + "} }");
+puts("func ijb_isNumber(v Value) Value { return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "number" + chr(34) + "} }");
+puts("func ijb_isString(v Value) Value { return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "string" + chr(34) + "} }");
+puts("func ijb_push(arr Value, ele Value) Value {");
+puts("if arr.tag != tArray {");
+puts("return vInvalid(" + chr(34) + "push: expected array" + chr(34) + ")");
+puts("}");
+puts("arr.arr.values = append(arr.arr.values, ele)");
+puts("return arr");
+puts("}");
+puts("func ijb_keys(arr Value) Value {");
+puts("if arr.tag != tMap {");
+puts("return vInvalid(" + chr(34) + "keys: expected map" + chr(34) + ")");
+puts("}");
+puts("keys := make([]Value, len(arr.m.pairs))");
+puts("i := 0");
+puts("for _, pair := range arr.m.pairs {");
+puts("keys[i] = pair.Key");
+puts("i++");
+puts("}");
+puts("return vArray(NewArrayValue(keys...))");
+puts("}");
+puts("func ijb_char(str Value, pos Value) Value {");
+puts("if str.tag != tString {");
+puts("return vInvalid(" + chr(34) + "char: expected key" + chr(34) + ")");
+puts("}");
+puts("posVal := pos.IntValue()");
+puts("if posVal >= 0 && posVal < len(str.s) {");
+puts("return Value{tag: tString, s: string(str.s[posVal])}");
+puts("} else {");
+puts("return vNull()");
+puts("}");
+puts("}");
+puts("func ijb_chr(asciiCode Value) Value { return Value{tag: tString, s: string(rune(asciiCode.IntValue()))} }");
+puts("func ijb_ord(c Value) Value { return Value{tag: tInt, i: int64(c.String()[0])} }");
+puts("func ijb_substr(str Value, start Value, length Value) Value { return Value{tag: tString, s: str.ValueString()[start.IntValue() : start.IntValue()+length.IntValue()]} }");
+// hasKey: O(1) key-presence via the same findPair the language's own map
+// index reads use (keyIndex on Key.String()). Non-map receivers are false,
+// matching the old IJ-level mapHasKey scan (keys(nonmap) -> invalid ->
+// len==0 -> false).
+puts("func ijb_hasKey(m Value, k Value) Value {");
+puts("if m.tag != tMap {");
+puts("return Value{tag: tBool, b: false}");
+puts("}");
+puts("_, found := m.m.findPair(k)");
+puts("return Value{tag: tBool, b: found}");
+puts("}");
 puts("func registerLibraryFunctions(ctx *Context) {");
 puts("ctx.Create(" + chr(34) + "puts" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("val := params.Get(Value{tag: tInt, i: 0})");
@@ -4574,13 +4630,7 @@ puts("}");
 puts("return vNull()");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "push" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("arr := params.Get(Value{tag: tInt, i: 0})");
-puts("if arr.tag != tArray {");
-puts("return vInvalid(" + chr(34) + "push: expected array" + chr(34) + ")");
-puts("}");
-puts("ele := params.Get(Value{tag: tInt, i: 1})");
-puts("arr.arr.values = append(arr.arr.values, ele)");
-puts("return arr");
+puts("return ijb_push(params.Get(Value{tag: tInt, i: 0}), params.Get(Value{tag: tInt, i: 1}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "pop" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("arr := params.Get(Value{tag: tInt, i: 0})");
@@ -4608,17 +4658,7 @@ puts("joined := strings.Join(strValues, delim)");
 puts("return Value{tag: tString, s: joined}");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "keys" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("arr := params.Get(Value{tag: tInt, i: 0})");
-puts("if arr.tag != tMap {");
-puts("return vInvalid(" + chr(34) + "keys: expected map" + chr(34) + ")");
-puts("}");
-puts("keys := make([]Value, len(arr.m.pairs))");
-puts("i := 0");
-puts("for _, pair := range arr.m.pairs {");
-puts("keys[i] = pair.Key");
-puts("i++");
-puts("}");
-puts("return vArray(NewArrayValue(keys...))");
+puts("return ijb_keys(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "values" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("arr := params.Get(Value{tag: tInt, i: 0})");
@@ -4634,35 +4674,19 @@ puts("}");
 puts("return vArray(NewArrayValue(values...))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "char" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("str := params.Get(Value{tag: tInt, i: 0})");
-puts("if str.tag != tString {");
-puts("return vInvalid(" + chr(34) + "char: expected key" + chr(34) + ")");
-puts("}");
-puts("pos := params.Get(Value{tag: tInt, i: 1})");
-puts("posVal := pos.IntValue()");
-puts("if posVal >= 0 && posVal < len(str.s) {");
-puts("return Value{tag: tString, s: string(str.s[posVal])}");
-puts("} else {");
-puts("return vNull()");
-puts("}");
+puts("return ijb_char(params.Get(Value{tag: tInt, i: 0}), params.Get(Value{tag: tInt, i: 1}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "len" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("x := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tInt, i: int64(x.Length())}");
+puts("return ijb_len(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "chr" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("asciiCode := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tString, s: string(rune(asciiCode.IntValue()))}");
+puts("return ijb_chr(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "ord" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("chr := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tInt, i: int64(chr.String()[0])}");
+puts("return ijb_ord(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "substr" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("str := params.Get(Value{tag: tInt, i: 0})");
-puts("start := params.Get(Value{tag: tInt, i: 1})");
-puts("len := params.Get(Value{tag: tInt, i: 2})");
-puts("return Value{tag: tString, s: str.ValueString()[start.IntValue() : start.IntValue()+len.IntValue()]}");
+puts("return ijb_substr(params.Get(Value{tag: tInt, i: 0}), params.Get(Value{tag: tInt, i: 1}), params.Get(Value{tag: tInt, i: 2}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "int" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("v := params.Get(Value{tag: tInt, i: 0})");
@@ -4674,8 +4698,7 @@ puts("return vInvalid(" + chr(34) + "int: " + chr(34) + " + err.Error())");
 puts("}");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "string" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("v := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tString, s: v.ValueString()}");
+puts("return ijb_string(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "random" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("secId, err := GenerateSecureID()");
@@ -4685,24 +4708,19 @@ puts("}");
 puts("return Value{tag: tString, s: secId}");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "typeof" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("v := params.Get(Value{tag: tInt, i: 0})");
-puts("return v.Type()");
+puts("return ijb_typeof(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "isArray" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("v := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "array" + chr(34) + "}");
+puts("return ijb_isArray(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "isMap" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("v := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "map" + chr(34) + "}");
+puts("return ijb_isMap(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "isNumber" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("v := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "number" + chr(34) + "}");
+puts("return ijb_isNumber(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "isString" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
-puts("v := params.Get(Value{tag: tInt, i: 0})");
-puts("return Value{tag: tBool, b: v.Type().ValueString() == " + chr(34) + "string" + chr(34) + "}");
+puts("return ijb_isString(params.Get(Value{tag: tInt, i: 0}))");
 puts("})))");
 puts("ctx.Create(" + chr(34) + "assert" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("t := params.Get(Value{tag: tInt, i: 0})");
@@ -4860,6 +4878,15 @@ puts("ctx.Create(" + chr(34) + "eputs" + chr(34) + ", vFunc(NewFunctionCommand(c
 puts("val := params.Get(Value{tag: tInt, i: 0})");
 puts("fmt.Fprintln(os.Stderr, val.String())");
 puts("return Value{tag: tInt, i: 0}");
+puts("})))");
+// P-VM.5a: hasKey(map, key) -- O(1) presence check (see ijb_hasKey).
+// Chains down to this native impl at every interpreted layer via
+// MapLibraryFunctionsInitializer's twoWrapper(hasKey), like getenv.
+// Unblocks the O(1) mapHasKey that the 2026-05-29 sentinel dead-end
+// could not have: the committed binary is no longer a frozen bridge, so
+// new builtins land by replacing the binary in the same commit.
+puts("ctx.Create(" + chr(34) + "hasKey" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
+puts("return ijb_hasKey(params.Get(Value{tag: tInt, i: 0}), params.Get(Value{tag: tInt, i: 1}))");
 puts("})))");
 puts("}");
 puts("// --- Value tagged-union (Phase 1) ---");
@@ -6893,6 +6920,39 @@ def prefixExpressionToGoDirect(self) {
     puts("D1R_UNSUPPORTED_PREFIX_OP_" + op);
 }
 
+// P-VM.5a: fixed-arity fast-path table for pristine builtins. Returns the
+// ijb_* Go helper name when (name, argc) has one, else null. Only consulted
+// for callees the resolver stamped resolvedOrigin=="lib", which guarantees
+// no top-level def/let anywhere in the program shadows the name (root
+// declarations are hoisted before bodies are resolved), so the binding can
+// never change at runtime -- exactly the same guarantee the existing
+// ij_<name> package-var emit relies on. Names outside this table (or with
+// a different arg count) keep the generic Execute(ctx, NewArrayValue(...))
+// emit, whose pad/truncate arity behavior must be preserved.
+def libFastEmitName(name, argc) {
+    if (argc == 1) {
+        if (name == "len") { return "ijb_len"; }
+        if (name == "typeof") { return "ijb_typeof"; }
+        if (name == "keys") { return "ijb_keys"; }
+        if (name == "chr") { return "ijb_chr"; }
+        if (name == "ord") { return "ijb_ord"; }
+        if (name == "string") { return "ijb_string"; }
+        if (name == "isArray") { return "ijb_isArray"; }
+        if (name == "isMap") { return "ijb_isMap"; }
+        if (name == "isNumber") { return "ijb_isNumber"; }
+        if (name == "isString") { return "ijb_isString"; }
+    }
+    if (argc == 2) {
+        if (name == "push") { return "ijb_push"; }
+        if (name == "char") { return "ijb_char"; }
+        if (name == "hasKey") { return "ijb_hasKey"; }
+    }
+    if (argc == 3) {
+        if (name == "substr") { return "ijb_substr"; }
+    }
+    return null;
+}
+
 // CallExpression dispatch mirrors CallExpression_toGo's static-vs-indirect
 // gate (kind=global && origin=def && staticDefByName[name]). Static-def
 // callees skip the Value->FunctionCommand.Execute indirection by calling the
@@ -6965,16 +7025,40 @@ def CallExpression_toGoDirect(self) {
             print("})");
         }
     } else {
-        print("(");
-        nodeToGoDirect(callee);
-        print(").Execute(ctx, NewArrayValue(");
-        let i = 0;
-        while (i < argsLen) {
-            if (i > 0) { print(", "); }
-            nodeToGoDirect(args[i]);
-            i = i + 1;
+        // P-VM.5a: pristine-lib callees with a fixed-arity ijb_* impl skip
+        // the Execute(ctx, NewArrayValue(...)) shim entirely (no *ArrayValue
+        // alloc, no FunctionCommand dispatch, no params.Get unboxing).
+        let fastName = null;
+        if (callee != null) {
+            if (callee["type"] == "Identifier") {
+                if (callee["resolvedKind"] == "global") {
+                    if (callee["resolvedOrigin"] == "lib") {
+                        fastName = libFastEmitName(callee["name"], argsLen);
+                    }
+                }
+            }
         }
-        print("))");
+        if (fastName != null) {
+            print(fastName + "(");
+            let i = 0;
+            while (i < argsLen) {
+                if (i > 0) { print(", "); }
+                nodeToGoDirect(args[i]);
+                i = i + 1;
+            }
+            print(")");
+        } else {
+            print("(");
+            nodeToGoDirect(callee);
+            print(").Execute(ctx, NewArrayValue(");
+            let i = 0;
+            while (i < argsLen) {
+                if (i > 0) { print(", "); }
+                nodeToGoDirect(args[i]);
+                i = i + 1;
+            }
+            print("))");
+        }
     }
 }
 
@@ -8510,6 +8594,9 @@ def StdIOLibraryFunctionsInitializer(context) {
 def MapLibraryFunctionsInitializer(context) {
     context["registerFunction"](context, "keys", oneWrapper(keys));
     context["registerFunction"](context, "values", oneWrapper(values));
+    // P-VM.5a: chain hasKey down so every nested layer's mapHasKey bottoms
+    // out at the native O(1) findPair instead of an interpreted keys() scan.
+    context["registerFunction"](context, "hasKey", twoWrapper(hasKey));
 }
 
 // ArrayLibraryFunctionsInitializer stub

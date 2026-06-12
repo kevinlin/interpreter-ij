@@ -539,3 +539,32 @@ real	0m0.041s
 user	0m0.012s
 sys	0m0.018s
 
+=== 2026-06-12T06:07:57Z label=p-vm5a-control-vm4 fresh=0 repeat=3 binary=/tmp/p5_control_old ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=panic:s user=assertions
+  run 2: real=panic:s user=assertions
+  run 3: real=panic:s user=assertions
+# NOTE: the p-vm5a-control-vm4 block above PANICKED because the OLD (P-VM.4)
+# binary cannot interpret the NEW source (hasKey builtin is undefined on it).
+# Control rerun from a git worktree at HEAD=b872382 (old binary + old source,
+# GOMAXPROCS=1, pinned, 3 runs): real 36.41 / 34.51 / 34.64 -> min 34.51s.
+# vs p-vm5a below (min 24.29s) = 1.42x same-session pinned min-of-3.
+=== 2026-06-12T06:09:22Z label=p-vm5a fresh=0 repeat=3 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=24.619s user=23.918s
+  run 2: real=24.528s user=23.910s
+  run 3: real=24.286s user=23.752s
+  real: min=24.29s median=24.53s max=24.62s
+  user: min=23.75s median=23.91s max=23.92s
+  headline (min real, GOMAXPROCS=1): 24.29s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.867s
+user	0m1.595s
+sys	0m0.208s
+-- native_interpreter.sh sample.s --
+
+real	0m0.039s
+user	0m0.011s
+sys	0m0.015s
+
