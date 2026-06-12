@@ -5868,43 +5868,88 @@ puts("sb2.WriteString(" + chr(34) + "}" + chr(34) + ")");
 puts("return sb2.String()");
 puts("}");
 puts("// --- Context (Value-based context) ---");
+// P-VM.5e: inline storage for the first 4 bindings. Per-call function
+// contexts and per-block contexts hold 1-4 entries almost always; the
+// Go map they used to allocate (header + first-insert group ~600B in 2
+// allocs per call) was the top malloc site in the selfhost profile
+// (mapassign growToSmall under evalFuncDecl.func2). Linear scan over
+// <=4 keys also beats map hashing on the read side. Spill (>4 bindings,
+// e.g. rootCtx) goes to the lazily-created map; a name lives in EITHER
+// the inline slots or the map, never both (localPut checks both before
+// appending), so shadowing/update semantics are unchanged.
 puts("type Context struct {");
 puts("parent    *Context");
 puts("variables map[string]Value");
+puts("inN       int");
+puts("inKeys    [4]string");
+puts("inVals    [4]Value");
 puts("}");
 puts("func NewContext(parent *Context) *Context {");
 puts("return &Context{parent: parent}");
 puts("}");
+puts("func (c *Context) localGet(name string) (Value, bool) {");
+puts("for i := 0; i < c.inN; i++ {");
+puts("if c.inKeys[i] == name { return c.inVals[i], true }");
+puts("}");
+puts("if c.variables != nil {");
+puts("v, ok := c.variables[name]");
+puts("return v, ok");
+puts("}");
+puts("return Value{}, false");
+puts("}");
+puts("func (c *Context) localPut(name string, value Value) {");
+puts("for i := 0; i < c.inN; i++ {");
+puts("if c.inKeys[i] == name { c.inVals[i] = value; return }");
+puts("}");
+puts("if c.variables != nil {");
+puts("if _, ok := c.variables[name]; ok { c.variables[name] = value; return }");
+puts("}");
+puts("if c.inN < 4 {");
+puts("c.inKeys[c.inN] = name");
+puts("c.inVals[c.inN] = value");
+puts("c.inN++");
+puts("return");
+puts("}");
+puts("if c.variables == nil { c.variables = make(map[string]Value) }");
+puts("c.variables[name] = value");
+puts("}");
+puts("func (c *Context) localUpdate(name string, value Value) bool {");
+puts("for i := 0; i < c.inN; i++ {");
+puts("if c.inKeys[i] == name { c.inVals[i] = value; return true }");
+puts("}");
+puts("if c.variables != nil {");
+puts("if _, ok := c.variables[name]; ok { c.variables[name] = value; return true }");
+puts("}");
+puts("return false");
+puts("}");
 puts("func (c *Context) Get(name string) Value {");
 puts("for ctx := c; ctx != nil; ctx = ctx.parent {");
-puts("if v, ok := ctx.variables[name]; ok { return v }");
+puts("if v, ok := ctx.localGet(name); ok { return v }");
 puts("}");
 puts("return vInvalid(" + chr(34) + "variable not found: " + chr(34) + " + name)");
 puts("}");
 puts("func (c *Context) Exists(name string) bool {");
 puts("for ctx := c; ctx != nil; ctx = ctx.parent {");
-puts("if _, ok := ctx.variables[name]; ok { return true }");
+puts("if _, ok := ctx.localGet(name); ok { return true }");
 puts("}");
 puts("return false");
 puts("}");
 puts("func (c *Context) Create(name string, value Value) Value {");
-puts("if c.variables == nil { c.variables = make(map[string]Value) }");
-puts("c.variables[name] = value");
+puts("c.localPut(name, value)");
 puts("return value");
 puts("}");
 puts("func (c *Context) Update(name string, value Value) Value {");
 puts("for ctx := c; ctx != nil; ctx = ctx.parent {");
-puts("if _, ok := ctx.variables[name]; ok { ctx.variables[name] = value; return value }");
+puts("if ctx.localUpdate(name, value) { return value }");
 puts("}");
 puts("return c.Create(name, value)");
 puts("}");
 puts("func (c *Context) GetLocal(name string) Value {");
-puts("if v, ok := c.variables[name]; ok { return v }");
+puts("if v, ok := c.localGet(name); ok { return v }");
 puts("return vInvalid(" + chr(34) + "variable not found: " + chr(34) + " + name)");
 puts("}");
 puts("func (c *Context) UpdateLocal(name string, value Value) Value {");
-puts("if c.variables == nil { c.variables = make(map[string]Value) }");
-puts("c.variables[name] = value");
+puts("c.localPut(name, value)");
 puts("return value");
 puts("}");
 puts("var rootCtx *Context");
@@ -6244,22 +6289,24 @@ puts("return vFunc(fn), false");
 puts("}");
 puts("pNames := n.params");
 puts("bodyN := n.body");
-puts("npar := len(pNames)");
-// Closure body allocates a fresh *Context per call. Combine the Context
-// struct + the params map into ONE struct literal (single alloc + sized
-// map) instead of NewContext(defCtx) → lazy `if c.variables == nil`
-// guard → Create("p", v). Drops ~one allocation per call AND skips the
-// nil-guard branch + per-Create function call overhead. Special-case
-// 0-param defs so they skip the map alloc entirely.
+// Closure body allocates a fresh *Context per call. P-VM.5e: params go
+// into the Context's INLINE slots (first 4) -- no map alloc at all for
+// the overwhelmingly common <=4-param case (the old sized-map emit was
+// the top malloc site: mapassign growToSmall under this closure).
+// Params 5+ spill through localPut. Missing args stay UNBOUND (reads
+// chain-walk to defCtx at read time) -- the i < nv guard is load-bearing.
 puts("fn := NewFunctionCommand(defCtx, func(callerCtx *Context, args *ArrayValue) Value {");
-puts("var local *Context");
-puts("if npar == 0 {");
-puts("local = &Context{parent: defCtx}");
-puts("} else {");
-puts("vars := make(map[string]Value, npar)");
+puts("local := &Context{parent: defCtx}");
 puts("nv := len(args.values)");
-puts("for i, p := range pNames { if i < nv { vars[p] = args.values[i] } }");
-puts("local = &Context{parent: defCtx, variables: vars}");
+puts("for i, p := range pNames {");
+puts("if i >= nv { break }");
+puts("if i < 4 {");
+puts("local.inKeys[i] = p");
+puts("local.inVals[i] = args.values[i]");
+puts("local.inN = i + 1");
+puts("} else {");
+puts("local.localPut(p, args.values[i])");
+puts("}");
 puts("}");
 puts("result, _ := eval(bodyN, local)");
 puts("return result");
@@ -9399,15 +9446,21 @@ def readSources() {
         source = "puts('No sources found');";
     }
     if (source == "//multiline") {
+        // P-VM.5e: collect lines and join ONCE. The old per-line
+        // `source = source + chr(10) + line` rebuilt the whole string per
+        // line -- O(n^2) bytes over a ~250KB source (~1GB of transient
+        // allocations per layer reading interpreter.s; a top GC driver in
+        // the selfhost profile at BOTH the native and interpreted layers).
+        let parts = [source];
         let line = gets();
         while (line != null) {
             if (line == "//<EOF>") {
-                return source;
+                return join(parts, chr(10));
             }
             if (line == "//<AST>") {
                 printAst = true;
                 runIt = false;
-                return source;
+                return join(parts, chr(10));
             }
             if (line == "//<GO>") {
                 transpileGo = true;
@@ -9418,10 +9471,10 @@ def readSources() {
                 transpileGoFull = true;
                 runIt = false;
             }
-            line = newlinehack(line);
-            source = source + chr(10) + line;
+            push(parts, newlinehack(line));
             line = gets();
         }
+        return join(parts, chr(10));
     }
     //puts("Hack:" + source); //DEBUG
     return source;

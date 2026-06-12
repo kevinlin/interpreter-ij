@@ -6,12 +6,17 @@ Succinct rules for how to BUILD the project:
 ./src/compile-local.sh src/interpreter.s /tmp/ij_stage1  # transpile + compile
 # Fresh self-builds emit a complete func main() and pass tests.
 # COMMITTED BRIDGE (interpreter_mac_arm64) IS the true fixed point (since
-# 2026-05-29; baf056fe... after P-VM.5c). A fresh compile-local
+# 2026-05-29; d7b7d4bc... after P-VM.5e). A fresh compile-local
 # byte-equals the committed binary (verify.sh check 5 enforces it). Recover the
 # old one-way bridge only for forensics: git show 062e95c:interpreter_mac_arm64.
 # interpreter_linux_amd64 is STILL the old frozen bridge -> rebuild on a
-# linux/Docker host. mcp_mac_arm64 rebuilt with P-VM.5d (21d9dd45...).
+# linux/Docker host. mcp_mac_arm64 rebuilt with P-VM.5e (7dd5a149...).
 # Default `bench.sh` measures current source.
+# 🏁 PERF GOAL MET (P-VM.5e, 2026-06-12): selfhost 4.41s pinned <= 7s target.
+# P-VM.5e: readSources joins lines (never `s = s + line` over big inputs --
+# O(n^2) was ~1GB transient strings/layer) + Context has inline storage for
+# the first 4 bindings (inN/inKeys/inVals; name lives in EITHER inline slots
+# OR the spill map, never both -- keep localPut's double probe).
 # P-VM.5c (2026-06-12): native Go dispatch loop for the IJ-side VM + zero-
 # alloc nat* fast paths for the hot hooks (exact IJ-semantics mirrors,
 # bail-to-hook on uncertain paths). IJ_VM_NATEXEC=0 opts back into the IJ
@@ -23,8 +28,9 @@ Succinct rules for how to BUILD the project:
 # + ijvmTagFn stamps chunk/defCtx/stack onto FunctionCommands so op-5 and
 # (*FunctionCommand).Execute run chunk-backed callees natively at any
 # depth/from any caller; selfhost 10.44s -> 7.99s = 1.31x pinned (user
-# 1.30x). Builtin `wrapped` closures (upvalue bail) still go slow-path.
-# Remaining to <=7s goal: ~1.14x -> P-VM.5e (GC/alloc volume; profile first).
+# 1.30x). NB (corrected in P-VM.5e): `wrapped` closures DO get chunks --
+# ijvmCompileFunc has no upvalue bail (op-6 name loads chain to defCtx);
+# only nested-`def` STATEMENTS bail a chunk.
 #
 # LEAN VALUE (P-VM.5b): emitted Value struct has NO d/arr/m/cmd/inv fields.
 # Payloads: double = v.f() (Float64bits in i), invalid msg = v.s, and
@@ -91,7 +97,7 @@ Run these after implementing to get immediate feedback:
 - VM differential (default VM must equal IJ_VM=0 eval; ~25s incl. a fresh MCP build): `bash scripts/vm_difftest.sh` (honours `IJ_BINARY=<stage2>` — use it to test VM changes BEFORE replacing the committed binary; stage1 is parity-blind)
 - Verify (5 checks): `bash scripts/verify.sh` (~1–2 min since P-VM.4/5a — checks 1–4 fast, check 5 is two `compile-local.sh` runs)
 - Bench (committed binary, quick single-run smoke; unreliable for decisions): `bash scripts/bench.sh <label>`. The committed binary is now current source, so this is meaningful again — but still single-run; use `--repeat 3` for decisions.
-- Bench source work (builds fixed-point stage2, min/median/max under GOMAXPROCS=1): `bash scripts/bench.sh --fresh --repeat 3 <label>` (~2 fast builds + N×~8–11s selfhost since P-VM.5d). ⚠️ Since P-VM.5c the real band is wide, ~1.33× (GC-dominated wall; user-time band stays ~1.04×) — judge regressions on min real AND user.
+- Bench source work (builds fixed-point stage2, min/median/max under GOMAXPROCS=1): `bash scripts/bench.sh --fresh --repeat 3 <label>` (~2 fast builds + N×~4–5s selfhost since P-VM.5e). ⚠️ Wall band can be GC/box-noise wide (a cold first run may be +20%); user-time band stays ~1.04× — judge regressions on min real AND user.
 - Re-capture goldens: `bash scripts/verify.sh --capture`
 
 Note: `verify.sh` check 5 now enforces the TRUE fixed point (committed binary == self-transpile output), tightened 2026-05-29 from the old determinism-only check.

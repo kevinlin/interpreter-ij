@@ -667,3 +667,25 @@ real	0m0.045s
 user	0m0.012s
 sys	0m0.019s
 
+# Same-session control (git worktree at e156781 = P-VM.5d HEAD, its own binary
+# + source, GOMAXPROCS=1, /usr/bin/time -p): real 9.27/7.97/7.71 user 6.73/6.80/6.79
+# -> p-vm5e min-real 4.41s = 1.75x (user 6.73 -> 4.12 = 1.63x). GOAL <=7s MET.
+=== 2026-06-12T11:08:46Z label=p-vm5e fresh=0 repeat=3 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=4.620s user=4.136s
+  run 2: real=4.479s user=4.138s
+  run 3: real=4.410s user=4.116s
+  real: min=4.41s median=4.48s max=4.62s
+  user: min=4.12s median=4.14s max=4.14s
+  headline (min real, GOMAXPROCS=1): 4.41s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.462s
+user	0m0.527s
+sys	0m0.059s
+-- native_interpreter.sh sample.s --
+
+real	0m0.047s
+user	0m0.012s
+sys	0m0.018s
+
