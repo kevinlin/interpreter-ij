@@ -625,3 +625,45 @@ real	0m0.198s
 user	0m0.013s
 sys	0m0.024s
 
+# NOTE: control below ran in a git worktree at 38c467a (P-VM.5c HEAD), old binary +
+# OLD SOURCE per the new-builtin gotcha (ijvmCallNative/ijvmTagFn added by P-VM.5d).
+# Same session, back-to-back with the p-vm5d entry that follows.
+=== 2026-06-12T10:33:02Z label=ctrl-p-vm5c-head fresh=0 repeat=3 ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=13.906s user=9.143s
+  run 2: real=10.438s user=8.747s
+  run 3: real=11.429s user=8.829s
+  real: min=10.44s median=11.43s max=13.91s
+  user: min=8.75s median=8.83s max=9.14s
+  headline (min real, GOMAXPROCS=1): 10.44s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.873s
+user	0m1.664s
+sys	0m0.307s
+-- native_interpreter.sh sample.s --
+
+real	0m0.040s
+user	0m0.012s
+sys	0m0.020s
+
+
+=== 2026-06-12T10:34:10Z label=p-vm5d fresh=1 repeat=3 binary=/tmp/ij-fresh ===
+-- selfhosted_interpreter.sh sample.s (stdin=hi, GOMAXPROCS=1, repeat=3) --
+  run 1: real=10.669s user=6.870s
+  run 2: real=9.877s user=6.907s
+  run 3: real=7.986s user=6.731s
+  real: min=7.99s median=9.88s max=10.67s
+  user: min=6.73s median=6.87s max=6.91s
+  headline (min real, GOMAXPROCS=1): 7.99s over 3 run(s)
+-- interpreter.sh sample.s --
+
+real	0m0.883s
+user	0m1.646s
+sys	0m0.251s
+-- native_interpreter.sh sample.s --
+
+real	0m0.045s
+user	0m0.012s
+sys	0m0.019s
+

@@ -1204,6 +1204,18 @@ def evaluateFunctionDeclaration(node, context) { // FIXME really?
         }
     }
 
+    // P-VM.5d: stamp the chunk + captured ctx + this layer's stack onto the
+    // native FunctionCommand beneath functionValue, so the op-5 native fast
+    // path can call the chunk directly (no Execute round trip, no arg
+    // wrapping). Gated: under IJ_VM_NATEXEC=0 the stamp is never read and
+    // the fallback path stays byte-for-byte identical to P-VM.4 behavior.
+    if (ijvmUseNativeExec) {
+        let tagCh = node["ijvmChunk"];
+        if (tagCh != null) {
+            ijvmTagFn(functionValue, tagCh, context, ijvmStack);
+        }
+    }
+
     // Place the function definition as a callable in context, under the function's name
     context["define"](context, node["name"], functionValue);
 
@@ -1349,7 +1361,7 @@ def libraryFunctionNames() {
         "typeof", "isArray", "isMap", "isNumber", "isString", "double",
         "echo", "print", "delete", "startsWith", "endsWith", "trim",
         "match", "findAll", "replace", "split", "getenv", "eputs", "hasKey",
-        "ijvmExecNative"
+        "ijvmCallNative", "ijvmTagFn"
     ];
 }
 
@@ -4607,15 +4619,17 @@ puts("}");
 puts("_, found := m.mp().findPair(k)");
 puts("return Value{tag: tBool, b: found}");
 puts("}");
-// P-VM.5c: native dispatch loop for the IJ-side bytecode VM. ijvmExec (the
-// IJ def) is now a thin wrapper that hands its chunk to this Go loop, so
-// chunk-op dispatch runs at native speed at EVERY interpretation depth: the
-// binary executing layer-A chunks calls it directly (positional hooks =
-// the binary's own ij_* functions), and each interpreted layer reaches it
-// through a chained registration (DefaultLibraryFunctionsInitializer), with
-// hooks = that layer's own function VALUES (1-arg args-array closures --
-// the meta-level encoding evaluateFunctionDeclaration gives every
-// interpreted function). The depth parameter selects the call encoding.
+// P-VM.5c/5d: native dispatch loop for the IJ-side bytecode VM. The IJ-side
+// ijvmCallChunk/ijvmRunTopChunk are thin gates into the native CALL
+// protocol (ijb_ijvmCallNative -> natCallChunk -> natExec), so chunk-op
+// dispatch AND the call frame protocol run at native speed at EVERY
+// interpretation depth: the binary's entry points call it directly
+// (positional hooks = the binary's own ij_* functions), and each
+// interpreted layer reaches it through a chained registration
+// (DefaultLibraryFunctionsInitializer), with hooks = that layer's own
+// function VALUES (1-arg args-array closures -- the meta-level encoding
+// evaluateFunctionDeclaration gives every interpreted function). The depth
+// parameter selects the call encoding.
 // Semantic work (infix/prefix operators, ctx get/assign/define, index
 // load/store, truthiness, runtime errors) still goes through the hooks, so
 // per-layer semantics and overlay overrides behave exactly like the old
@@ -4629,6 +4643,8 @@ puts("names []Value");
 puts("poss []Value");
 puts("nodes []Value");
 puts("numSlots int");
+puts("numParams int");
+puts("maxDepth int");
 puts("}");
 puts("var natChunkCache = map[*MapValue]*natChunk{}");
 puts('func natChunkArr(ch *MapValue, key string) []Value {');
@@ -4657,6 +4673,8 @@ puts('nc.names = natChunkArr(ch, "names")');
 puts('nc.poss = natChunkArr(ch, "poss")');
 puts('nc.nodes = natChunkArr(ch, "nodes")');
 puts('nc.numSlots = ch.Get(Value{tag: tString, s: "numSlots"}).IntValue()');
+puts('nc.numParams = ch.Get(Value{tag: tString, s: "numParams"}).IntValue()');
+puts('nc.maxDepth = ch.Get(Value{tag: tString, s: "maxDepth"}).IntValue()');
 puts("natChunkCache[ch] = nc");
 puts("return nc");
 puts("}");
@@ -4837,11 +4855,53 @@ puts("}");
 // op-5/15/16 build fresh collections (those escape into program data).
 // The stack is accessed through the *ArrayValue on every op because
 // nested calls grow it via append (ijvmEnsureStack).
-puts("func ijvmExecGo(chunkV Value, stackV Value, baseV Value, frameCtx Value, hInfix Value, hPrefix Value, hCtxGet Value, hCtxAssign Value, hCtxDefine Value, hTruthy Value, hIdxLoad Value, hIdxPut Value, hErrNew Value, hThrow Value, hBadKey Value, depth int) Value {");
-puts('if chunkV.tag != tMap || stackV.tag != tArray { return vInvalid("ijvmExecNative: bad chunk or stack") }');
-puts("nc := natDecodeChunk(chunkV.mp())");
-puts("stk := stackV.arrp()");
-puts("base := baseV.IntValue()");
+// P-VM.5d: the native side OWNS the per-layer stack pointer (keyed by the
+// stack's *ArrayValue identity -- one ijvmStack per layer, pointer-stable
+// across growth). Every chunk-frame entry goes through natCallChunk: the
+// IJ-side ijvmCallChunk/ijvmRunTopChunk gate straight into it (via the
+// ijvmCallNative builtin), and the op-5 same-layer fast path below calls
+// it directly. The IJ-side ijvmSP is only live on the IJ_VM_NATEXEC=0
+// fallback path; the two never interleave (the gate is a per-layer
+// startup constant).
+puts("var natSP = map[*ArrayValue]int{}");
+puts("func natEnsureStack(stk *ArrayValue, need int) {");
+puts("for len(stk.values) < need { stk.values = append(stk.values, vNull()) }");
+puts("}");
+// P-VM.5d: per-layer call environment, recorded on the first chunk frame a
+// layer runs (every layer enters natCallChunk through its own gate before
+// any of its guest functions can be called). A layer's hook values and
+// depth are startup constants (top-level lets; one ijvm state per layer),
+// so the first-entry snapshot is always valid. FunctionCommand.Execute
+// uses this to run a stamped callee's chunk directly even when the call
+// arrives from a DIFFERENT layer or from tree-walked code -- the cases the
+// op-5 same-layer fast path cannot see.
+puts("type natLayerInfo struct {");
+puts("h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11 Value");
+puts("depth int");
+puts("}");
+puts("var natLayer = map[*ArrayValue]*natLayerInfo{}");
+// Mirrors the IJ ijvmCallChunk EXACTLY: bind params (null-pad missing,
+// drop extras), reserve the frame window, run, restore SP. frameCtx for
+// function chunks = the captured defCtx; top-level chunks pass the program
+// ctx and have numParams 0 (so a nil av is fine).
+puts("func natCallChunk(nc *natChunk, stk *ArrayValue, defCtx Value, av []Value, hInfix Value, hPrefix Value, hCtxGet Value, hCtxAssign Value, hCtxDefine Value, hTruthy Value, hIdxLoad Value, hIdxPut Value, hErrNew Value, hThrow Value, hBadKey Value, depth int) Value {");
+puts("if _, ok := natLayer[stk]; !ok {");
+puts("natLayer[stk] = &natLayerInfo{hInfix, hPrefix, hCtxGet, hCtxAssign, hCtxDefine, hTruthy, hIdxLoad, hIdxPut, hErrNew, hThrow, hBadKey, depth}");
+puts("}");
+puts("base := natSP[stk]");
+puts("top := base + nc.numSlots + nc.maxDepth");
+puts("natEnsureStack(stk, top)");
+puts("np := nc.numParams");
+puts("na := len(av)");
+puts("for i := 0; i < np; i++ {");
+puts("if i < na { stk.values[base+i] = av[i] } else { stk.values[base+i] = vNull() }");
+puts("}");
+puts("natSP[stk] = top");
+puts("r := natExec(nc, stk, base, defCtx, hInfix, hPrefix, hCtxGet, hCtxAssign, hCtxDefine, hTruthy, hIdxLoad, hIdxPut, hErrNew, hThrow, hBadKey, depth)");
+puts("natSP[stk] = base");
+puts("return r");
+puts("}");
+puts("func natExec(nc *natChunk, stk *ArrayValue, base int, frameCtx Value, hInfix Value, hPrefix Value, hCtxGet Value, hCtxAssign Value, hCtxDefine Value, hTruthy Value, hIdxLoad Value, hIdxPut Value, hErrNew Value, hThrow Value, hBadKey Value, depth int) Value {");
 puts("sp := base + nc.numSlots");
 puts("pc := 0");
 puts("n := len(nc.ops)");
@@ -4894,8 +4954,27 @@ puts("if natTruthy(c) { pc++ } else { pc = int(nc.aa[pc]) }");
 // op 5 mirrors the source loop's `fv(args)`: guest function values need
 // depth+1 wraps (one more than hooks -- guest values carry one more
 // closure level than the host's own machinery functions).
+// P-VM.5d fast path: a callee that ijvmTagFn stamped with a chunk AND
+// whose stack is THIS layer's stack runs natCallChunk directly -- no args
+// copy, no depth-wrap tower, no Execute -> functionValue tree-walk ->
+// ijvmCallChunk round trip. Same stack <=> same layer <=> same hooks +
+// depth (hooks are top-level lets, one ijvm state per layer). The arg
+// window [sp-argc, sp) is disjoint from the callee's slot window (which
+// starts at this frame's top), and natCallChunk re-reads stk.values after
+// any growth, so passing the live sub-slice is safe.
 puts("case 5:");
 puts("argc := int(nc.aa[pc])");
+puts("fnv := stk.values[sp-argc-1]");
+puts("if fnv.tag == tFunc {");
+puts("fc := fnv.cmdp()");
+puts("if fc.ijChunk != nil && fc.ijStack == stk {");
+puts("rv := natCallChunk(fc.ijChunk, stk, fc.ijDefCtx, stk.values[sp-argc:sp], hInfix, hPrefix, hCtxGet, hCtxAssign, hCtxDefine, hTruthy, hIdxLoad, hIdxPut, hErrNew, hThrow, hBadKey, depth)");
+puts("sp -= argc");
+puts("stk.values[sp-1] = rv");
+puts("pc++");
+puts("break");
+puts("}");
+puts("}");
 puts("av := make([]Value, argc)");
 puts("copy(av, stk.values[sp-argc:sp])");
 puts("sp -= argc");
@@ -5029,8 +5108,29 @@ puts("}");
 puts("}");
 puts("return vNull()");
 puts("}");
-puts("func ijb_ijvmExecNative(chunkV Value, stackV Value, baseV Value, frameCtx Value, h1 Value, h2 Value, h3 Value, h4 Value, h5 Value, h6 Value, h7 Value, h8 Value, h9 Value, h10 Value, h11 Value, depthV Value) Value {");
-puts("return ijvmExecGo(chunkV, stackV, baseV, frameCtx, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, depthV.IntValue())");
+// P-VM.5d: the IJ-visible native entry is now the CALL protocol (bind +
+// frame + exec), replacing the old exec-only entry: SP lives in natSP so
+// the op-5 fast path and the IJ-side entry points cannot desync.
+puts("func ijb_ijvmCallNative(chunkV Value, stackV Value, defCtxV Value, argsV Value, h1 Value, h2 Value, h3 Value, h4 Value, h5 Value, h6 Value, h7 Value, h8 Value, h9 Value, h10 Value, h11 Value, depthV Value) Value {");
+puts('if chunkV.tag != tMap || stackV.tag != tArray { return vInvalid("ijvmCallNative: bad chunk or stack") }');
+puts("var av []Value");
+puts("if argsV.tag == tArray { av = argsV.arrp().values }");
+puts("return natCallChunk(natDecodeChunk(chunkV.mp()), stackV.arrp(), defCtxV, av, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, depthV.IntValue())");
+puts("}");
+// P-VM.5d: stamp a guest function value with its compiled chunk, captured
+// def context and the creating layer's stack. evaluateFunctionDeclaration
+// calls this once per chunk-backed closure; the op-5 fast path reads the
+// stamp. Values are native FunctionCommands at the bottom of every
+// interpretation tower, so the builtin works at any depth (args pass
+// through each layer's chain registration unchanged).
+puts("func ijb_ijvmTagFn(fnV Value, chunkV Value, defCtxV Value, stackV Value) Value {");
+puts("if fnV.tag == tFunc && chunkV.tag == tMap && stackV.tag == tArray {");
+puts("fc := fnV.cmdp()");
+puts("fc.ijChunk = natDecodeChunk(chunkV.mp())");
+puts("fc.ijDefCtx = defCtxV");
+puts("fc.ijStack = stackV.arrp()");
+puts("}");
+puts("return fnV");
 puts("}");
 puts("func registerLibraryFunctions(ctx *Context) {");
 puts("ctx.Create(" + chr(34) + "puts" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
@@ -5316,14 +5416,21 @@ puts("})))");
 puts("ctx.Create(" + chr(34) + "hasKey" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("return ijb_hasKey(params.Get(Value{tag: tInt, i: 0}), params.Get(Value{tag: tInt, i: 1}))");
 puts("})))");
-// P-VM.5c: native ijvm dispatch loop entry. 16 args: chunk, stack, base,
-// frameCtx, 11 hooks, depth. The binary's ijvmExec wrapper direct-emits
-// ijb_ijvmExecNative with depth 0; interpreted layers reach this binding
-// through the ijvmExecChain registration, which adds 1 per layer hop.
-puts("ctx.Create(" + chr(34) + "ijvmExecNative" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
+// P-VM.5d: native ijvm call entry (replaces the P-VM.5c exec entry). 16
+// args: chunk, stack, defCtx, args, 11 hooks, depth. The binary's
+// ijvmCallChunk/ijvmRunTopChunk direct-emit ijb_ijvmCallNative with depth
+// 0; interpreted layers reach this binding through the ijvmCallChain
+// registration, which adds 1 per layer hop.
+puts("ctx.Create(" + chr(34) + "ijvmCallNative" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
 puts("p := params.values");
-puts('if len(p) < 16 { return vInvalid("ijvmExecNative: expected 16 args") }');
-puts("return ijb_ijvmExecNative(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15])");
+puts('if len(p) < 16 { return vInvalid("ijvmCallNative: expected 16 args") }');
+puts("return ijb_ijvmCallNative(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15])");
+puts("})))");
+// P-VM.5d: chunk stamp for the op-5 native fast path (see ijb_ijvmTagFn).
+puts("ctx.Create(" + chr(34) + "ijvmTagFn" + chr(34) + ", vFunc(NewFunctionCommand(ctx, func(ctx *Context, params *ArrayValue) Value {");
+puts("p := params.values");
+puts('if len(p) < 4 { return vInvalid("ijvmTagFn: expected 4 args") }');
+puts("return ijb_ijvmTagFn(p[0], p[1], p[2], p[3])");
 puts("})))");
 puts("}");
 puts("// --- Value tagged-union (Phase 1) ---");
@@ -5811,8 +5918,35 @@ puts("}");
 puts("type FunctionCommand struct {");
 puts("definitionCtx *Context");
 puts("executeFunc   func(*Context, *ArrayValue) Value");
+// P-VM.5d: ijvmTagFn stamp -- set for chunk-backed guest closures so the
+// op-5 native fast path can run the callee chunk without the Execute ->
+// functionValue tree-walk -> ijvmCallChunk round trip. ijStack doubles as
+// the layer-identity check (one ijvmStack per layer, pointer-stable).
+puts("ijChunk *natChunk");
+puts("ijDefCtx Value");
+puts("ijStack *ArrayValue");
 puts("}");
 puts("func (c *FunctionCommand) Execute(callerCtx *Context, params *ArrayValue) Value {");
+puts("// P-VM.5d: a chunk-stamped guest closure can run its chunk natively no");
+puts("// matter who calls it (tree-walked bodies, other layers, hooks): every");
+puts("// caller uses the canonical tower encoding -- callee(args) wraps once");
+puts("// per interpretation hop, so params.values[0] unwrapped layer-depth");
+puts("// times is the logical args array. The layer env comes from natLayer");
+puts("// (recorded before any guest closure of that layer can be invoked).");
+puts("// Any shape surprise bails to the original tree-walk closure, which");
+puts("// reaches the same chunk through ijvmCallChunk -- semantics identical.");
+puts("if c.ijChunk != nil {");
+puts("if li, ok := natLayer[c.ijStack]; ok && len(params.values) > 0 {");
+puts("x := params.values[0]");
+puts("good := true");
+puts("for i := 0; i < li.depth; i++ {");
+puts("if x.tag == tArray && len(x.arrp().values) > 0 { x = x.arrp().values[0] } else { good = false; break }");
+puts("}");
+puts("if good && x.tag == tArray {");
+puts("return natCallChunk(c.ijChunk, c.ijStack, c.ijDefCtx, x.arrp().values, li.h1, li.h2, li.h3, li.h4, li.h5, li.h6, li.h7, li.h8, li.h9, li.h10, li.h11, li.depth)");
+puts("}");
+puts("}");
+puts("}");
 puts("// Phase 2.5: pass nil to executeFunc. The closure body already opens its own");
 puts("// `local := NewContext(defCtx)` (evalFuncDecl emit), so any ctx we pass here");
 puts("// is discarded. Skipping NewContext(c.definitionCtx) saves one *Context alloc");
@@ -7436,8 +7570,11 @@ def libFastEmitName(name, argc) {
     if (argc == 3) {
         if (name == "substr") { return "ijb_substr"; }
     }
+    if (argc == 4) {
+        if (name == "ijvmTagFn") { return "ijb_ijvmTagFn"; }
+    }
     if (argc == 16) {
-        if (name == "ijvmExecNative") { return "ijb_ijvmExecNative"; }
+        if (name == "ijvmCallNative") { return "ijb_ijvmCallNative"; }
     }
     return null;
 }
@@ -8349,19 +8486,23 @@ def ijvmExecFallback(chunk, base, frameCtx) {
     return null; // unreachable: every chunk ends with op 13
 }
 
-// P-VM.5c: default dispatch is the native Go loop (ijb_ijvmExecNative via
-// the lib fast path). The hooks are passed as VALUES so the native loop
-// calls back into THIS layer's semantics -- each layer's overrides keep
-// working while chunk-op dispatch runs at native speed at every depth.
-// At the binary, "ijvmExecNative" direct-emits the Go builtin and depth 0
+// P-VM.5c/5d: default dispatch is the native Go loop, entered through the
+// CALL protocol (ijb_ijvmCallNative via the lib fast path): the native
+// side binds params, reserves the frame window, and owns the per-layer
+// stack pointer (natSP keyed by stack identity), so the op-5 same-layer
+// fast path inside natExec and these entry points can never desync. The
+// hooks are passed as VALUES so the native loop calls back into THIS
+// layer's semantics -- each layer's overrides keep working while chunk-op
+// dispatch runs at native speed at every depth.
+// At the binary, "ijvmCallNative" direct-emits the Go builtin and depth 0
 // means "hooks are compiled defs, positional". At an interpreted layer the
-// same name resolves to the chained ijvmExecChain registration (see
+// same name resolves to the chained ijvmCallChain registration (see
 // DefaultLibraryFunctionsInitializer), which adds 1 to depth per layer hop
 // so the native loop knows how many closure-tower levels its hook /
-// callee values carry (see ijvmExecGo in goLibPrefix).
+// callee values carry (see natExec in goLibPrefix).
 // The hooks are hoisted into top-level lets because a bare def-as-value
-// reference direct-emits as ctx.Get(name) -- 11 root-map lookups per exec
-// call on the hottest path. Top-level lets emit as Go package vars.
+// reference direct-emits as ctx.Get(name) -- 11 root-map lookups per call
+// on the hottest path. Top-level lets emit as Go package vars.
 let ijvmUseNativeExec = getenv("IJ_VM_NATEXEC") != "0";
 let ijvmHookInfix = applyInfixOperator;
 let ijvmHookPrefix = applyPrefixOperator;
@@ -8375,24 +8516,14 @@ let ijvmHookErrNew = RuntimeError_create;
 let ijvmHookThrow = throwRuntimeError;
 let ijvmHookBadKey = ijvmBadMapKey;
 
-def ijvmExec(chunk, base, frameCtx) {
-    if (ijvmUseNativeExec) {
-        return ijvmExecNative(chunk, ijvmStack, base, frameCtx,
-            ijvmHookInfix, ijvmHookPrefix, ijvmHookCtxGet, ijvmHookCtxAssign,
-            ijvmHookCtxDefine, ijvmHookTruthy, ijvmHookIndexLoad, ijvmHookIndexPut,
-            ijvmHookErrNew, ijvmHookThrow, ijvmHookBadKey, 0);
-    }
-    return ijvmExecFallback(chunk, base, frameCtx);
-}
-
 // One chain hop per interpretation layer: registered as the NEXT layer's
-// "ijvmExecNative" binding, it forwards to THIS layer's binding with
+// "ijvmCallNative" binding, it forwards to THIS layer's binding with
 // depth+1, so by the time the call bottoms out at the Go builtin, depth
 // equals the calling layer's interpretation depth.
-def ijvmExecChain(chunk, stack, base, frameCtx, hInfix, hPrefix, hCtxGet,
+def ijvmCallChain(chunk, stack, defCtx, args, hInfix, hPrefix, hCtxGet,
         hCtxAssign, hCtxDefine, hTruthy, hIdxLoad, hIdxPut, hErrNew, hThrow,
         hBadKey, depth) {
-    return ijvmExecNative(chunk, stack, base, frameCtx,
+    return ijvmCallNative(chunk, stack, defCtx, args,
         hInfix, hPrefix, hCtxGet, hCtxAssign, hCtxDefine, hTruthy,
         hIdxLoad, hIdxPut, hErrNew, hThrow, hBadKey, depth + 1);
 }
@@ -8401,7 +8532,16 @@ def ijvmExecChain(chunk, stack, base, frameCtx, hInfix, hPrefix, hCtxGet,
 // the IJ tree-walk closure's exact arity behavior), reserve the frame
 // window, run. Non-param slots need no init: compile order guarantees every
 // slot is stored (its `let` runs) before any read at the same pc range.
+// Default path: the native call protocol does all of that in Go (and the
+// op-5 fast path bypasses even this entry for same-layer calls). The IJ
+// body below is the IJ_VM_NATEXEC=0 fallback only.
 def ijvmCallChunk(chunk, defCtx, args) {
+    if (ijvmUseNativeExec) {
+        return ijvmCallNative(chunk, ijvmStack, defCtx, args,
+            ijvmHookInfix, ijvmHookPrefix, ijvmHookCtxGet, ijvmHookCtxAssign,
+            ijvmHookCtxDefine, ijvmHookTruthy, ijvmHookIndexLoad, ijvmHookIndexPut,
+            ijvmHookErrNew, ijvmHookThrow, ijvmHookBadKey, 0);
+    }
     let base = ijvmSP;
     let numSlots = chunk["numSlots"];
     let top = base + numSlots + chunk["maxDepth"];
@@ -8419,18 +8559,26 @@ def ijvmCallChunk(chunk, defCtx, args) {
         i = i + 1;
     }
     ijvmSP = top;
-    let r = ijvmExec(chunk, base, defCtx);
+    let r = ijvmExecFallback(chunk, base, defCtx);
     ijvmSP = base;
     return r;
 }
 
 // Run a compiled top-level statement chunk against the program context.
+// Top chunks have numParams 0, so the native call protocol with null args
+// is exactly "reserve window + exec".
 def ijvmRunTopChunk(chunk, ctx) {
+    if (ijvmUseNativeExec) {
+        return ijvmCallNative(chunk, ijvmStack, ctx, null,
+            ijvmHookInfix, ijvmHookPrefix, ijvmHookCtxGet, ijvmHookCtxAssign,
+            ijvmHookCtxDefine, ijvmHookTruthy, ijvmHookIndexLoad, ijvmHookIndexPut,
+            ijvmHookErrNew, ijvmHookThrow, ijvmHookBadKey, 0);
+    }
     let base = ijvmSP;
     let top = base + chunk["numSlots"] + chunk["maxDepth"];
     ijvmEnsureStack(top);
     ijvmSP = top;
-    let r = ijvmExec(chunk, base, ctx);
+    let r = ijvmExecFallback(chunk, base, ctx);
     ijvmSP = base;
     return r;
 }
@@ -9108,8 +9256,16 @@ def threeWrapper(f) {
     return wrapped;
 }
 
-// P-VM.5c: arity adapter for the ijvmExecChain registration (16 params:
-// chunk, stack, base, frameCtx, 11 hooks, depth).
+// P-VM.5d: arity adapter for the ijvmTagFn chain registration.
+def fourWrapper(f) {
+    def wrapped(args) {
+        return f(args[0],args[1],args[2],args[3]);
+    }
+    return wrapped;
+}
+
+// P-VM.5c/5d: arity adapter for the ijvmCallChain registration (16 params:
+// chunk, stack, defCtx, args, 11 hooks, depth).
 def sixteenWrapper(f) {
     def wrapped(args) {
         return f(args[0],args[1],args[2],args[3],args[4],args[5],args[6],
@@ -9130,14 +9286,16 @@ def DefaultLibraryFunctionsInitializer(context) {
     // interpretation layer can read the IJ_VM gate and emit debug to stderr.
     context["registerFunction"](context, "getenv", oneWrapper(getenv));
     context["registerFunction"](context, "eputs", oneWrapper(eputs));
-    // P-VM.5c: chain the native ijvm dispatch loop down to every nested
-    // layer. The guest's "ijvmExecNative" binds THIS layer's ijvmExecChain,
-    // which forwards to THIS layer's own "ijvmExecNative" binding with
+    // P-VM.5c/5d: chain the native ijvm call protocol down to every nested
+    // layer. The guest's "ijvmCallNative" binds THIS layer's ijvmCallChain,
+    // which forwards to THIS layer's own "ijvmCallNative" binding with
     // depth+1 -- so the call bottoms out at the Go builtin carrying the
     // exact interpretation depth, which selects the closure-tower call
-    // encoding for hooks and callees. The binary's own ijvmExec never
-    // consults this: it direct-emits ijb_ijvmExecNative with depth 0.
-    context["registerFunction"](context, "ijvmExecNative", sixteenWrapper(ijvmExecChain));
+    // encoding for hooks and callees. The binary's own entry points never
+    // consult this: they direct-emit ijb_ijvmCallNative with depth 0.
+    // ijvmTagFn passes values through unchanged at every hop (like getenv).
+    context["registerFunction"](context, "ijvmCallNative", sixteenWrapper(ijvmCallChain));
+    context["registerFunction"](context, "ijvmTagFn", fourWrapper(ijvmTagFn));
 }
 
 // StdIOLibraryFunctionsInitializer implementation with puts and gets simulation
